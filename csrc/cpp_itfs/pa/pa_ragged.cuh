@@ -19,7 +19,7 @@
 #include "pa_kernels.cuh"
 
 #if defined(__HIPCC__) && \
-    (defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))
+    (defined(__gfx908__) || defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))
   #define __HIP__GFX9__
 #endif
 

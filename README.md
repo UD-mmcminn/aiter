@@ -77,7 +77,7 @@ AITER is the **default kernel backend for LLM inference on AMD GPUs**, integrate
 
 <sup>1</sup> On RDNA, Triton and most FlyDSL kernels run, as do most HIP kernels (norm, RoPE, quant, activation, plus some GEMM/attention). Most CK and ASM kernels are CDNA-only.
 
-<sup>2</sup> gfx908 build targeting is enabled. MI100 hardware validation currently covers source-backed activation, CK BF16 LayerNorm and fused-add LayerNorm, fused RMSNorm plus INT8 quantization, basic and grouped top-k routing, MoE sorting through the Opus, CK, and FlyDSL backends, KV-cache reshape/quantization, native BF16 paged-attention decode, Triton BF16 GEMM, and dense/packed-varlen Triton BF16 FlashAttention forward/backward. AITER ASM code objects have not been ported, and broad correctness and performance coverage is still incomplete; this is not production support yet.
+<sup>2</sup> gfx908 build targeting is enabled. MI100 hardware validation currently covers source-backed activation, CK BF16 LayerNorm and fused-add LayerNorm, fused RMSNorm plus INT8 quantization, basic and grouped top-k routing, MoE sorting through the Opus, CK, and FlyDSL backends, KV-cache reshape/quantization, native BF16 paged-attention decode (standard, v1, and ragged), Triton BF16 GEMM, and dense/packed-varlen Triton BF16 FlashAttention forward/backward. AITER ASM code objects have not been ported, and broad correctness and performance coverage is still incomplete; this is not production support yet.
 
 ## Operators
 

@@ -5,6 +5,7 @@ import math
 
 import torch
 
+import aiter
 from aiter.paged_attn import PagedAttention
 
 
@@ -101,5 +102,203 @@ def test_public_paged_attention_bf16_gqa() -> None:
     print(f"PASS public BF16 paged-attention GQA: max_abs={max_abs:.8g}")
 
 
+def _make_nhd_decode_case():
+    torch.manual_seed(1)
+
+    batch, num_q_heads, num_kv_heads, head_size = 2, 8, 1, 128
+    block_size = 16
+    context_lens = torch.tensor([57, 273], dtype=torch.int32, device="cuda")
+    max_context_len = int(context_lens.max().item())
+    max_blocks_per_seq = math.ceil(max_context_len / block_size)
+    num_blocks = batch * max_blocks_per_seq
+    scale = 1.0 / math.sqrt(head_size)
+
+    query = torch.randn(
+        batch, num_q_heads, head_size, dtype=torch.bfloat16, device="cuda"
+    )
+    key_cache = torch.randn(
+        num_blocks,
+        block_size,
+        num_kv_heads,
+        head_size,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    value_cache = torch.randn_like(key_cache)
+    block_tables = torch.arange(
+        num_blocks, dtype=torch.int32, device="cuda"
+    ).reshape(batch, max_blocks_per_seq)
+
+    reference = torch.empty_like(query)
+    heads_per_kv = num_q_heads // num_kv_heads
+    blocks_used = []
+    last_page_lens = []
+    for batch_idx, seq_len_tensor in enumerate(context_lens):
+        seq_len = int(seq_len_tensor.item())
+        num_pages = math.ceil(seq_len / block_size)
+        physical_blocks = block_tables[batch_idx, :num_pages]
+        blocks_used.append(physical_blocks)
+        last_page_lens.append((seq_len - 1) % block_size + 1)
+
+        key = (
+            key_cache[physical_blocks]
+            .reshape(-1, num_kv_heads, head_size)[:seq_len]
+            .permute(1, 0, 2)
+            .repeat_interleave(heads_per_kv, dim=0)
+            .float()
+        )
+        value = (
+            value_cache[physical_blocks]
+            .reshape(-1, num_kv_heads, head_size)[:seq_len]
+            .permute(1, 0, 2)
+            .repeat_interleave(heads_per_kv, dim=0)
+            .float()
+        )
+        scores = torch.einsum("hd,hkd->hk", query[batch_idx].float(), key) * scale
+        probabilities = torch.softmax(scores, dim=-1)
+        reference[batch_idx] = torch.einsum(
+            "hk,hkd->hd", probabilities, value
+        ).to(torch.bfloat16)
+
+    page_counts = torch.tensor(
+        [blocks.numel() for blocks in blocks_used], dtype=torch.int32, device="cuda"
+    )
+    kv_indptr = torch.cat(
+        [
+            torch.zeros(1, dtype=torch.int32, device="cuda"),
+            page_counts.cumsum(0, dtype=torch.int32),
+        ]
+    )
+    kv_page_indices = torch.cat(blocks_used)
+    kv_last_page_lens = torch.tensor(
+        last_page_lens, dtype=torch.int32, device="cuda"
+    )
+    assert kv_indptr.dtype == kv_page_indices.dtype == kv_last_page_lens.dtype
+
+    return (
+        query,
+        key_cache,
+        value_cache,
+        block_tables,
+        context_lens,
+        max_context_len,
+        scale,
+        kv_indptr,
+        kv_page_indices,
+        kv_last_page_lens,
+        reference,
+    )
+
+
+def _make_workspace(query: torch.Tensor, max_context_len: int) -> torch.Tensor:
+    partition_size = 256
+    num_seqs, num_heads, head_size = query.shape
+    max_num_partitions = math.ceil(max_context_len / partition_size)
+    workspace_bytes = (
+        num_seqs
+        * num_heads
+        * max_num_partitions
+        * head_size
+        * query.element_size()
+        + 2 * num_seqs * num_heads * max_num_partitions * 4
+    )
+    return torch.empty(workspace_bytes, dtype=torch.uint8, device=query.device)
+
+
+def test_public_paged_attention_v1_bf16_gqa() -> None:
+    (
+        query,
+        key_cache,
+        value_cache,
+        block_tables,
+        context_lens,
+        max_context_len,
+        scale,
+        _,
+        _,
+        _,
+        reference,
+    ) = _make_nhd_decode_case()
+
+    output = torch.empty_like(query)
+    workspace = _make_workspace(query, max_context_len)
+    one = torch.tensor(1.0, dtype=torch.float32, device=query.device)
+    cu_query_lens = torch.arange(
+        query.size(0) + 1, dtype=torch.int32, device=query.device
+    )
+    aiter.paged_attention_v1(
+        output,
+        workspace,
+        query,
+        key_cache,
+        value_cache,
+        scale,
+        block_tables,
+        cu_query_lens,
+        context_lens,
+        max_context_len,
+        None,
+        "auto",
+        "NHD",
+        0.0,
+        one,
+        one,
+    )
+    torch.cuda.synchronize()
+
+    max_abs = (output.float() - reference.float()).abs().max().item()
+    torch.testing.assert_close(output, reference, atol=2e-2, rtol=2e-2)
+    print(f"PASS public BF16 paged-attention v1 GQA: max_abs={max_abs:.8g}")
+
+
+def test_public_paged_attention_ragged_bf16_gqa() -> None:
+    (
+        query,
+        key_cache,
+        value_cache,
+        _,
+        _,
+        max_context_len,
+        scale,
+        kv_indptr,
+        kv_page_indices,
+        kv_last_page_lens,
+        reference,
+    ) = _make_nhd_decode_case()
+
+    partition_size = 256
+    max_num_partitions = math.ceil(max_context_len / partition_size)
+    output = torch.empty_like(query)
+    workspace = _make_workspace(query, max_context_len)
+    one = torch.tensor(1.0, dtype=torch.float32, device=query.device)
+    aiter.paged_attention_ragged(
+        output,
+        workspace,
+        query,
+        key_cache,
+        value_cache,
+        scale,
+        kv_indptr,
+        kv_page_indices,
+        kv_last_page_lens,
+        key_cache.size(1),
+        max_num_partitions,
+        None,
+        "auto",
+        "NHD",
+        0.0,
+        one,
+        one,
+        partition_size=partition_size,
+    )
+    torch.cuda.synchronize()
+
+    max_abs = (output.float() - reference.float()).abs().max().item()
+    torch.testing.assert_close(output, reference, atol=2e-2, rtol=2e-2)
+    print(f"PASS public BF16 paged-attention ragged GQA: max_abs={max_abs:.8g}")
+
+
 if __name__ == "__main__":
     test_public_paged_attention_bf16_gqa()
+    test_public_paged_attention_v1_bf16_gqa()
+    test_public_paged_attention_ragged_bf16_gqa()
