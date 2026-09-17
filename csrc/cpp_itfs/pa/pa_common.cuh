@@ -148,7 +148,22 @@ __device__ __forceinline__ floatx4 gcn_mfma16x16x16_instr(const _B16x4& inpA,
     }
     else if constexpr(std::is_same<T, __hip_bfloat16>::value)
     {
+#if defined(__gfx908__)
+        // CDNA1 has the original K=8 BF16 MFMA rather than the CDNA2+ K=16
+        // 1k form. Preserve the K=16 helper contract by accumulating the low
+        // and high two-BF16 fragments separately. Both instructions have the
+        // same 16x16 accumulator/lane layout as the 1k form.
+        vec_converter a;
+        vec_converter b;
+        a.vec4 = inpA;
+        b.vec4 = inpB;
+        auto out = __builtin_amdgcn_mfma_f32_16x16x8bf16(
+            a.vec2[0], b.vec2[0], inpC, absz, cbid, blgp);
+        return __builtin_amdgcn_mfma_f32_16x16x8bf16(
+            a.vec2[1], b.vec2[1], out, absz, cbid, blgp);
+#else
         return __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(inpA, inpB, inpC, absz, cbid, blgp);
+#endif
     }
     else
     {

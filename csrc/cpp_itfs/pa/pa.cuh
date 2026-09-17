@@ -27,7 +27,8 @@
 #include <hip/hip_bf16.h>
 #include <type_traits>
 
-#if defined(__HIPCC__) && (defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))
+#if defined(__HIPCC__) && \
+    (defined(__gfx908__) || defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))
 #define __HIP__GFX9__
 #endif
 
