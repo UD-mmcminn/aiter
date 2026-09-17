@@ -18,7 +18,7 @@ from aiter.jit.utils.chip_info import get_gfx
 from aiter.test_common import benchmark, checkAllclose, run_perftest
 
 PAD_SLOT_ID = -1
-SUPPORTED_GFX = ("gfx942", "gfx950")
+SUPPORTED_GFX = ("gfx908", "gfx942", "gfx950")
 
 _MAX_PERF_ROTATIONS = 32
 _PERF_ROTATION_BUDGET = 256 * 1024 * 1024
@@ -122,11 +122,18 @@ def causal_conv1d_update_ref(
             torch.remainder(width_idx, state_len).unsqueeze(1).expand(-1, dim, -1)
         )
         x_new = torch.cat([conv_state.gather(2, width_idx), x], dim=-1).to(weight.dtype)
-        copy_idx = torch.arange(seqlen, dtype=torch.long, device=x.device).unsqueeze(
-            0
-        ) + cache_seqlens.unsqueeze(1)
-        copy_idx = torch.remainder(copy_idx, state_len).unsqueeze(1).expand(-1, dim, -1)
-        conv_state.scatter_(2, copy_idx, x)
+        # Preserve the kernel's sequential ring-buffer writes. A single scatter
+        # has duplicate destinations when seqlen > state_len, and PyTorch does
+        # not define which source value wins for duplicate indices.
+        for token_idx in range(seqlen):
+            copy_idx = torch.remainder(
+                cache_seqlens + token_idx, state_len
+            ).to(torch.long).reshape(batch, 1, 1)
+            conv_state.scatter_(
+                2,
+                copy_idx.expand(-1, dim, 1),
+                x[:, :, token_idx : token_idx + 1],
+            )
     out = F.conv1d(x_new, weight.unsqueeze(1), bias, padding=0, groups=dim)[
         :, :, -seqlen:
     ]
