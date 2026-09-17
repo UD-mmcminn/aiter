@@ -25,7 +25,8 @@ K_DIM = 2048
 V_DIM = 4096
 WIDTH = 4
 STATE_LEN = WIDTH - 1
-SUPPORTED_GFX = ("gfx942", "gfx950")
+SUPPORTED_GFX = ("gfx908", "gfx942", "gfx950")
+BACKENDS = ("hip", "flydsl", "triton2d", "triton")
 _MAX_PERF_ROTATIONS = 32
 _PERF_ROTATION_BUDGET = 256 * 1024 * 1024
 
@@ -488,6 +489,7 @@ def test_prefill_split_qkv_benchmark(
     dtype: torch.dtype = torch.bfloat16,
     layout: str = "channel_first",
     with_initial_state: bool = True,
+    backends=None,
 ):
     """Benchmark public prefill backends with model layouts and metadata."""
     conv_dim = 2 * k_dim + v_dim
@@ -543,19 +545,21 @@ def test_prefill_split_qkv_benchmark(
             metadata=metadata,
         )
 
-    candidates = {
-        "hip": lambda state: run_backend("hip", state),
-    }
+    selected_backends = set(backends or BACKENDS)
+    candidates = {}
+    if "hip" in selected_backends:
+        candidates["hip"] = lambda state: run_backend("hip", state)
     if layout == "channel_first":
         # Only HIP's public contract is validated for the transposed
         # channel-last view; the other public backends consume channel-first x.
-        candidates.update(
-            {
-                "flydsl": lambda state: run_backend("flydsl", state),
-                "triton2d": lambda state: run_backend("triton2d", state),
-                "triton": lambda state: run_backend("triton", state),
-            }
-        )
+        if "flydsl" in selected_backends:
+            candidates["flydsl"] = lambda state: run_backend("flydsl", state)
+        if "triton2d" in selected_backends:
+            candidates["triton2d"] = lambda state: run_backend("triton2d", state)
+        if "triton" in selected_backends:
+            candidates["triton"] = lambda state: run_backend("triton", state)
+    if not candidates:
+        raise ValueError(f"no selected backend supports {layout=}")
 
     tokens = batch * seqlen
     flops = 2 * tokens * conv_dim * WIDTH
@@ -667,6 +671,19 @@ def main():
         choices=[0, 1],
         default=[0, 1],
     )
+    parser.add_argument(
+        "--backends",
+        type=str,
+        nargs="+",
+        choices=BACKENDS,
+        default=list(BACKENDS),
+        help="Backends to validate. For example: --backends hip",
+    )
+    parser.add_argument(
+        "--benchmark-only",
+        action="store_true",
+        help="Skip the additional mixed-varlen correctness sweep.",
+    )
     args = parser.parse_args()
 
     rows = []
@@ -687,6 +704,7 @@ def main():
                 dtype,
                 layout,
                 bool(with_initial_state),
+                args.backends,
             )
         )
     aiter.logger.info(
@@ -694,11 +712,14 @@ def main():
         pd.DataFrame(rows).to_markdown(index=False),
     )
 
+    if args.benchmark_only:
+        return
+
     # Preserve the mixed-varlen script coverage that existed before the
     # benchmark entrypoint was added. These direct calls retain the assertions
     # in the pytest correctness test and cover lengths up to 5063 tokens.
     for backend, cu, with_initial_state in itertools.product(
-        ("hip", "flydsl", "triton2d", "triton"),
+        args.backends,
         SHAPES,
         (False, True),
     ):
