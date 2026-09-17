@@ -23,7 +23,7 @@ from aiter.test_common import (
 torch.set_default_device("cuda")
 
 # triton + torch_einsum run on every arch; only the CK path is arch-limited.
-CK_SUPPORTED_GFX = ["gfx942", "gfx950"]
+CK_SUPPORTED_GFX = ["gfx908", "gfx942", "gfx950"]
 
 
 def run_torch(x, weight, dtype=dtypes.bf16):
@@ -38,7 +38,8 @@ def run_torch(x, weight, dtype=dtypes.bf16):
 
 
 @benchmark()
-def test_gemm(b, m, n, k, dtype, layout):
+def test_gemm(b, m, n, k, dtype, layout, backends=None):
+    backends = set(backends or ("triton", "torch_einsum", "ck"))
     weight = torch.randint(-20, 20, (b, n, k), dtype=dtypes.bf16)
     # Input (x) and output (y) layout, both logically [b, m, k] / [b, m, n]:
     #   mbn: transposed views of contiguous [m, b, *] tensors (physically
@@ -59,14 +60,15 @@ def test_gemm(b, m, n, k, dtype, layout):
     # (no transpose around the call), producing [s, g, r].
     o_sgd = x.transpose(0, 1).contiguous()
 
-    gemm_funcs = {
-        # triton path mirrors the model call (preallocated transposed YQ)
-        "triton": lambda: batched_gemm_bf16_triton(x, weight, YQ=y),
-        "torch_einsum": lambda: torch.einsum(
+    gemm_funcs = {}
+    if "triton" in backends:
+        # Triton mirrors the model call (preallocated transposed YQ).
+        gemm_funcs["triton"] = lambda: batched_gemm_bf16_triton(x, weight, YQ=y)
+    if "torch_einsum" in backends:
+        gemm_funcs["torch_einsum"] = lambda: torch.einsum(
             "sgd,grd->sgr" if layout == "mbn" else "sgd,grd->gsr", o_sgd, weight
-        ),
-    }
-    # CK is arch-limited (gfx942/gfx950). It reads the operands' strides, so it runs
+        )
+    # CK is arch-limited. It reads the operands' strides, so it runs
     # on the transposed mbk input too and no longer has to be skipped for it.
     #
     # Two entries, because the two halves are reachable by different calls. The
@@ -76,7 +78,7 @@ def test_gemm(b, m, n, k, dtype, layout):
     # explicitly rather than with empty_like, whose layout preservation depends on
     # the source being non-overlapping and dense, and asserted below so that a
     # future change cannot quietly leave this testing nothing.
-    if get_gfx() in CK_SUPPORTED_GFX:
+    if "ck" in backends and get_gfx() in CK_SUPPORTED_GFX:
         gemm_funcs["ck"] = lambda: aiter.batched_gemm_bf16_CK(x, weight)
         if layout == "mbn":
             # A size-1 dimension constrains no stride, so the model's own form --
@@ -192,6 +194,14 @@ def main():
         bmn = plain contiguous [b, m, n].
         e.g.: -l mbn""",
     )
+    parser.add_argument(
+        "--backends",
+        type=str,
+        choices=["triton", "torch_einsum", "ck"],
+        nargs="+",
+        default=["triton", "torch_einsum", "ck"],
+        help="Backends to validate. For example: --backends ck",
+    )
     args = parser.parse_args()
 
     for dtype in args.dtype:
@@ -199,7 +209,7 @@ def main():
         for layout, b, (m, n, k) in itertools.product(
             args.layout, args.batch, args.mnk
         ):
-            ret = test_gemm(b, m, n, k, dtype, layout)
+            ret = test_gemm(b, m, n, k, dtype, layout, args.backends)
             df.append(ret)
         df = pd.DataFrame(df)
         aiter.logger.info(
