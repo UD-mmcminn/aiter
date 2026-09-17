@@ -95,6 +95,12 @@ parser = argparse.ArgumentParser(
     description="Test layernorm2d performance and correctness",
 )
 parser.add_argument(
+    "--mode",
+    choices=("plain", "add", "both"),
+    default="both",
+    help="LayerNorm variant to test.",
+)
+parser.add_argument(
     "-d",
     "--dtype",
     type=dtypes.str2Dtype,
@@ -107,30 +113,24 @@ parser.add_argument(
 parser.add_argument(
     "-m",
     type=int,
-    nargs="?",
-    default=128,
+    nargs="+",
+    default=[128],
     help="""Number of rows in the input tensor.
-    e.g.: -m 128""",
+    e.g.: -m 1 32 128""",
 )
 parser.add_argument(
     "-n",
     type=int,
-    nargs="?",
-    default=8192,
+    nargs="+",
+    default=[8192],
     help="""Number of columns in the input tensor.
-    e.g.: -n 8192""",
+    e.g.: -n 1024 4096 8192""",
 )
 args = parser.parse_args()
-# for dtype in [dtypes.fp16, dtypes.bf16]:
-#     for m in [1, 2, 4, 8, 16, 32, 64, 128, 256]:
-#         for n in [4096, 8192, 16384, 32768, 65536]:
-#             test_layernorm2d(dtype, m, n)
 for dtype in args.dtype:
-    test_layernorm2d_fuseAdd(dtype, args.m, args.n)
-
-
-# print('\nstart fuse add test')
-# for dtype in [dtypes.fp16, dtypes.bf16]:
-#     for m in [1, 2, 4, 8, 16, 32, 64, 128, 256]:
-#         for n in [4096, 8192, 16384, 32768, 65536]:
-#             test_layernorm2d_fuseAdd(dtype, m, n)
+    for m in args.m:
+        for n in args.n:
+            if args.mode in ("plain", "both"):
+                test_layernorm2d(dtype, m, n)
+            if args.mode in ("add", "both"):
+                test_layernorm2d_fuseAdd(dtype, m, n)
