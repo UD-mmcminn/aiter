@@ -2863,6 +2863,46 @@ def flash_attn_func(
         if _flydsl_result is not None:
             return _flydsl_result
 
+    # MI100 has no matching AITER FMHA ASM code objects, while the source-backed
+    # Triton v3 kernels support CDNA1 and are validated for this BF16 subset.
+    # Keep the gate deliberately narrow: calls using features that v3 does not
+    # expose through this wrapper continue through the existing CK/ASM dispatch.
+    sink_size = int(window_size[2]) if len(window_size) > 2 else 0
+    use_gfx908_triton_v3 = (
+        get_gfx() == "gfx908"
+        and q.dtype == dtypes.bf16
+        and k.dtype == dtypes.bf16
+        and v.dtype == dtypes.bf16
+        and q.shape[-1] == k.shape[-1] == v.shape[-1]
+        and q.shape[-1] in (64, 128)
+        and q.shape[-2] % k.shape[-2] == 0
+        and k.shape[-2] == v.shape[-2]
+        and dropout_p == 0.0
+        and bias is None
+        and alibi_slopes is None
+        and sink_ptr is None
+        and sink_size == 0
+        and cu_seqlens_q is None
+        and cu_seqlens_kv is None
+        and num_splits <= 1
+        and not return_lse
+        and not return_attn_probs
+    )
+    if use_gfx908_triton_v3:
+        from .triton.attention.mha_v3 import (
+            flash_attn_func as flash_attn_func_v3_triton,
+        )
+
+        return flash_attn_func_v3_triton(
+            q=q,
+            k=k,
+            v=v,
+            softmax_scale=softmax_scale,
+            causal=causal,
+            window_size=(int(window_size[0]), int(window_size[1])),
+            deterministic=deterministic,
+        )
+
     if not ENABLE_CK:
         from .triton.attention.mha import flash_attn_func as flash_attn_func_triton
 
@@ -3845,6 +3885,56 @@ def flash_attn_varlen_func(
         )
         if _flydsl_result is not None:
             return _flydsl_result
+
+    # MI100 packed-varlen fallback matching the validated Triton v3 CDNA1
+    # subset. Features not represented by the v3 wrapper stay on the existing
+    # CK/ASM dispatcher below.
+    sink_size = int(window_size[2]) if len(window_size) > 2 else 0
+    use_gfx908_triton_v3 = (
+        get_gfx() == "gfx908"
+        and q.dtype == dtypes.bf16
+        and k.dtype == dtypes.bf16
+        and v.dtype == dtypes.bf16
+        and q.dim() == 3
+        and k.dim() == 3
+        and v.dim() == 3
+        and q.shape[-1] == k.shape[-1] == v.shape[-1] == 64
+        and q.shape[-2] % k.shape[-2] == 0
+        and k.shape[-2] == v.shape[-2]
+        and cu_seqlens_q.dtype == torch.int32
+        and cu_seqlens_k.dtype == torch.int32
+        and min_seqlen_q == 0
+        and dropout_p == 0.0
+        and logits_soft_cap == 0.0
+        and bias is None
+        and alibi_slopes is None
+        and block_table is None
+        and out is None
+        and cu_seqlens_q_padded is None
+        and cu_seqlens_k_padded is None
+        and sink_ptr is None
+        and sink_size == 0
+        and not return_lse
+        and not return_attn_probs
+    )
+    if use_gfx908_triton_v3:
+        from .triton.attention.mha_v3 import (
+            flash_attn_varlen_func as flash_attn_varlen_func_v3_triton,
+        )
+
+        return flash_attn_varlen_func_v3_triton(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            softmax_scale=softmax_scale,
+            causal=causal,
+            window_size=(int(window_size[0]), int(window_size[1])),
+            deterministic=deterministic,
+        )
 
     if not ENABLE_CK:
         from .triton.attention.mha import (
