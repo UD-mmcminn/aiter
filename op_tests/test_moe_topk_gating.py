@@ -74,7 +74,7 @@ _EPLB_EP_SIZE = 4
 # starved-row check (T=4096/16384 sit above the E=512/640 prefill_n gates).
 _SOFTMAX_PREFILL_N_EXPERTS = [512, 640]
 
-SUPPORTED_GFX = ["gfx942", "gfx950", "gfx1250"]
+SUPPORTED_GFX = ["gfx908", "gfx942", "gfx950", "gfx1250"]
 
 
 def _selection_scores(
