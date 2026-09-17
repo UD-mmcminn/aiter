@@ -17,7 +17,8 @@ from aiter.test_common import benchmark, checkAllclose, run_perftest
 torch.set_default_device("cuda")
 
 BLOCK_SIZE_M = 32
-SUPPORTED_GFX = ["gfx942", "gfx950", "gfx1250"]
+SUPPORTED_GFX = ["gfx908", "gfx942", "gfx950", "gfx1250"]
+SORTING_BACKENDS = ("opus", "ck", "flydsl")
 
 
 def set_moe_sorting_backend(backend: str) -> None:
@@ -283,6 +284,7 @@ def test_moe_sorting(
     dispatch_policy=0,
     accumulate=True,
     routing_case="valid",
+    backends=SORTING_BACKENDS,
 ):
     """accumulate=False (with has_expert_mask=False) makes moe_sorting allocate
     a (0,0) moe_buf placeholder instead of the full [M, model_dim] buffer --
@@ -310,7 +312,7 @@ def test_moe_sorting(
         num_local_tokens,
     )
 
-    candidates = {
+    all_candidates = {
         "opus": lambda: moe_sorting(
             topk_ids,
             topk_weights,
@@ -338,7 +340,7 @@ def test_moe_sorting(
     }
     # FlyDSL kernel only supports dispatch_policy=0 today.
     if dispatch_policy == 0:
-        candidates["flydsl"] = lambda: moe_sorting(
+        all_candidates["flydsl"] = lambda: moe_sorting(
             topk_ids,
             topk_weights,
             E,
@@ -350,6 +352,9 @@ def test_moe_sorting(
             dispatch_policy,
             accumulate=accumulate,
         )
+    candidates = {
+        name: all_candidates[name] for name in backends if name in all_candidates
+    }
 
     flops, nbytes = _moe_sorting_roofline(token, topk, E, model_dim, dtype)
     ret = {"gfx": get_gfx(), "routing case": routing_case}
@@ -562,6 +567,7 @@ def test_moe_sorting_decode_graph_perf(
     real_tokens,
     has_expert_mask=False,
     num_iters=50,
+    backends=SORTING_BACKENDS,
 ):
     """Benchmark steady-state torch.cuda.graph() REPLAY latency
 
@@ -592,7 +598,6 @@ def test_moe_sorting_decode_graph_perf(
         "capture_capacity": capture_capacity,
         "real_tokens": real_tokens,
     }
-    backends = ["opus", "ck", "flydsl"]
     for name in backends:
         set_moe_sorting_backend(name)
 
@@ -651,7 +656,7 @@ def test_moe_sorting_decode_graph_perf(
     return ret
 
 
-def run_invalid_routing_regressions(dtype, model_dim, inter_dim):
+def run_invalid_routing_regressions(dtype, model_dim, inter_dim, backends):
     rows = []
     for routing_case in ("all-empty", "mixed"):
         rows.append(
@@ -667,6 +672,7 @@ def run_invalid_routing_regressions(dtype, model_dim, inter_dim):
                 dispatch_policy=0,
                 accumulate=True,
                 routing_case=routing_case,
+                backends=backends,
             )
         )
     return rows
@@ -773,6 +779,13 @@ def main():
         "    default: valid matrix plus focused all-empty/mixed regressions",
     )
     parser.add_argument(
+        "--backends",
+        choices=SORTING_BACKENDS,
+        nargs="+",
+        default=list(SORTING_BACKENDS),
+        help="Sorting implementations to validate. e.g.: --backends opus ck",
+    )
+    parser.add_argument(
         "-dg",
         "--decode_graph",
         type=int,
@@ -824,6 +837,7 @@ def main():
                         dispatch_policy=dispatch_policy,
                         accumulate=accumulate,
                         routing_case=routing_case,
+                        backends=args.backends,
                     )
                 )
         if args.routing_case is None:
@@ -832,6 +846,7 @@ def main():
                     dtype,
                     args.model_dim,
                     args.inter_dim,
+                    args.backends,
                 )
             )
         df = pd.DataFrame(df)
@@ -839,19 +854,22 @@ def main():
             "moe_sorting summary (markdown):\n%s", df.to_markdown(index=False)
         )
 
-        for expert_mask, m in itertools.product(args.expert_mask, args.m):
-            if m < 2:
-                continue  # need capture/replay token counts to differ
-            for E, topk in model_configs:
-                test_moe_sorting_flydsl_cuda_graph_capture(
-                    dtype,
-                    m,
-                    args.model_dim,
-                    E,
-                    topk,
-                    has_expert_mask=expert_mask,
-                )
-        aiter.logger.info("moe_sorting FlyDSL cuda-graph capture/replay: all passed")
+        if "flydsl" in args.backends:
+            for expert_mask, m in itertools.product(args.expert_mask, args.m):
+                if m < 2:
+                    continue  # need capture/replay token counts to differ
+                for E, topk in model_configs:
+                    test_moe_sorting_flydsl_cuda_graph_capture(
+                        dtype,
+                        m,
+                        args.model_dim,
+                        E,
+                        topk,
+                        has_expert_mask=expert_mask,
+                    )
+            aiter.logger.info(
+                "moe_sorting FlyDSL cuda-graph capture/replay: all passed"
+            )
 
         if args.decode_graph:
             decode_rows = []
@@ -868,6 +886,7 @@ def main():
                             topk,
                             real_tokens,
                             has_expert_mask=expert_mask,
+                            backends=args.backends,
                         )
                     )
             decode_df = pd.DataFrame(decode_rows)
