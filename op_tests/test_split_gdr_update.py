@@ -13,7 +13,7 @@ from aiter.test_common import benchmark, checkAllclose, run_perftest
 
 # The kernel uses 64-lane __shfl_xor reductions. These are the wave64 targets
 # supported in-tree; gfx1250 is wave32 and cannot execute those reductions.
-SUPPORTED_GFX = ("gfx942", "gfx950")
+SUPPORTED_GFX = ("gfx908", "gfx942", "gfx950")
 _MAX_PERF_ROTATIONS = 32
 _PERF_ROTATION_BUDGET = 256 * 1024 * 1024
 
