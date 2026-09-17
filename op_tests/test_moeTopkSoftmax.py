@@ -103,16 +103,19 @@ def test_asm(
 
 
 @benchmark()
-def test_topk_softmax(dtype, token, E, topk, renormalize=True):
-    gating_output = torch.randn((token, E + 10), dtype=dtype, device="cuda")
-    # making gating_output as strided tensor for testing
-    gating_output = gating_output[:, :E]
+def test_topk_softmax(dtype, token, E, topk, renormalize=True, strided=True):
+    if strided:
+        gating_output = torch.randn((token, E + 10), dtype=dtype, device="cuda")
+        # Make gating_output a row-strided tensor for testing.
+        gating_output = gating_output[:, :E]
+    else:
+        gating_output = torch.randn((token, E), dtype=dtype, device="cuda")
     (topk_weights_a, topk_ids_a), _avg_a = test_nofuse(gating_output, topk, renormalize)
     id_ref, _ref = torch.sort(topk_ids_a)
     w_ref = topk_weights_a.gather(1, _ref)
 
     func_dict = {"hip": test_fuse, "asm": test_asm}
-    ret = {}
+    ret = {"layout": "strided" if strided else "contiguous"}
     for tag, func in func_dict.items():
         if tag == "asm" and not (
             (E, topk)
@@ -868,18 +871,42 @@ parser.add_argument(
     Raise this to stabilize GPU clocks for latency-bound (small-token) shapes.
     e.g.: -w 50""",
 )
+parser.add_argument(
+    "--basic-only",
+    action="store_true",
+    help="Run only the source-backed topk_softmax correctness sweep.",
+)
+parser.add_argument(
+    "--biased-only",
+    action="store_true",
+    help="Run only the source-backed biased grouped-topk correctness sweep.",
+)
+parser.add_argument(
+    "--contiguous",
+    action="store_true",
+    help="Use contiguous gating rows in the basic topk_softmax sweep.",
+)
 
 args = parser.parse_args()
 
-df = []
-for dtype in args.dtype:
-    for e in args.expert:
-        for m in args.token:
-            ret = test_topk_softmax(dtype, m, e, args.k)
-            df.append(ret)
-df = pd.DataFrame(df)
-df_md = df.to_markdown(index=False)
-aiter.logger.info("moeTopkSoftmax summary (markdown):\n%s", df_md)
+if args.basic_only and args.biased_only:
+    parser.error("--basic-only and --biased-only are mutually exclusive")
+
+if not args.biased_only:
+    df = []
+    for dtype in args.dtype:
+        for e in args.expert:
+            for m in args.token:
+                ret = test_topk_softmax(
+                    dtype, m, e, args.k, strided=not args.contiguous
+                )
+                df.append(ret)
+    df = pd.DataFrame(df)
+    df_md = df.to_markdown(index=False)
+    aiter.logger.info("moeTopkSoftmax summary (markdown):\n%s", df_md)
+
+    if args.basic_only:
+        raise SystemExit(0)
 
 df = []
 for token in args.token:
@@ -905,6 +932,9 @@ for token in args.token:
 df = pd.DataFrame(df)
 df_md = df.to_markdown(index=False)
 aiter.logger.info("moeTopkSoftmax_biased_grouped_topk summary (markdown):\n%s", df_md)
+
+if args.biased_only:
+    raise SystemExit(0)
 
 df = []
 for token in args.token:

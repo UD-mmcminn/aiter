@@ -69,6 +69,18 @@ __device__ __forceinline__ T shuffle(const T& input, const int src_lane, const i
     return word_wise(input, [=](int v) -> int { return __shfl(v, src_lane, width); });
 }
 
+// Exchange values with the lane selected by XOR within a power-of-two lane
+// group. Unlike the DPP half-row sequence, ds_bpermute is reliable for several
+// independent 8-lane reductions packed into one gfx908 wave64.
+template <typename T>
+__device__ __forceinline__ T shuffle_xor(const T& input, const int lane_mask)
+{
+    const int src_lane = __lane_id() ^ lane_mask;
+    return word_wise(input, [=](int v) -> int {
+        return __builtin_amdgcn_ds_bpermute(src_lane << 2, v);
+    });
+}
+
 } // namespace aiter_dpp
 
 // Reduction operators and the key/value pair the arg-reductions carry.
@@ -335,9 +347,15 @@ __device__ constexpr T multithread_reduce(T data, F reduce_op, int thread_num)
     }
     else if(thread_num == 8)
     {
+#if defined(__gfx908__)
+        data = reduce_op(aiter_dpp::shuffle_xor(data, 1), data);
+        data = reduce_op(aiter_dpp::shuffle_xor(data, 2), data);
+        data = reduce_op(aiter_dpp::shuffle_xor(data, 4), data);
+#else
         data = reduce_op(aiter_dpp::move_dpp<T, 0xb1>(data), data);
         data = reduce_op(aiter_dpp::move_dpp<T, 0x4e>(data), data);
         data = reduce_op(aiter_dpp::move_dpp<T, 0x141>(data), data);
+#endif
     }
     else if(thread_num == 16)
     {

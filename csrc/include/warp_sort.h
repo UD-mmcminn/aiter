@@ -1826,6 +1826,16 @@ __device__ inline void warp_cumsum(data_t& thread_data, opus::number<warp_size> 
                                                     bound_ctrl))// row_newbcast:7
                                                     );
 #else
+#if defined(__HIP_DEVICE_COMPILE__) && \
+    (defined(__gfx908__) || defined(__gfx906__) || defined(__gfx900__))
+        // gfx908 and older do not support row_newbcast:7 (DPP 0x157).
+        // Broadcast lane 7 of each 16-lane row through LDS instead.
+        const int broadcast_src_lane = (__lane_id() & ~15) + 7;
+        const int broadcast_addr     = broadcast_src_lane << 2;
+        const int bcast7 = __builtin_amdgcn_ds_bpermute(
+            broadcast_addr, __builtin_bit_cast(int, thread_data));
+        data_t xxx = __builtin_bit_cast(data_t, bcast7);
+#else
         data_t xxx =
             __builtin_bit_cast(data_t,
                                __builtin_amdgcn_mov_dpp(__builtin_bit_cast(int, thread_data),
@@ -1833,6 +1843,7 @@ __device__ inline void warp_cumsum(data_t& thread_data, opus::number<warp_size> 
                                                         row_mask,
                                                         bank_mask,
                                                         bound_ctrl)); // row_newbcast:7
+#endif
 
         data_t yyy  = (__lane_id() / 8) % 2 == 0 ? 0 : xxx;
         thread_data = thread_data - yyy;

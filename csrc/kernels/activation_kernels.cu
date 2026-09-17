@@ -96,12 +96,11 @@ __global__ void act_and_mul_kernel(DTYPE_O* __restrict__ out,         // [..., d
                 opus::fp32x2_t a    = {ax0, ax1};
                 opus::fp32x2_t b    = {y0, y1};
                 opus::fp32x2_t c;
-#if defined(__gfx906__) || defined(__gfx908__) || defined(__gfx90a__) || \
-    defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__) || \
-    defined(__gfx950__)
+#if defined(__gfx90a__) || defined(__gfx940__) || defined(__gfx941__) || \
+    defined(__gfx942__) || defined(__gfx950__)
                 asm volatile("v_pk_mul_f32 %0, %1, %2" : "=v"(c) : "v"(a), "v"(b));
 #else
-                // RDNA archs lack `v_pk_mul_f32`; portable fallback.
+                // gfx908 and RDNA archs lack `v_pk_mul_f32`; portable fallback.
                 c.x = a.x * b.x;
                 c.y = a.y * b.y;
 #endif
@@ -273,12 +272,11 @@ __global__ void act_and_mul_bias_kernel(DTYPE_O* __restrict__ out,              
                 opus::fp32x2_t a = {ax0, ax1};
                 opus::fp32x2_t b = {y0, y1};
                 opus::fp32x2_t c;
-#if defined(__gfx906__) || defined(__gfx908__) || defined(__gfx90a__) || \
-    defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__) || \
-    defined(__gfx950__)
+#if defined(__gfx90a__) || defined(__gfx940__) || defined(__gfx941__) || \
+    defined(__gfx942__) || defined(__gfx950__)
                 asm volatile("v_pk_mul_f32 %0, %1, %2" : "=v"(c) : "v"(a), "v"(b));
 #else
-                // RDNA archs lack `v_pk_mul_f32`; portable fallback.
+                // gfx908 and RDNA archs lack `v_pk_mul_f32`; portable fallback.
                 c.x = a.x * b.x;
                 c.y = a.y * b.y;
 #endif
@@ -450,16 +448,15 @@ __global__ void scaled_act_and_mul_kernel(DTYPE_O* __restrict__ out,         // 
                 float2 scale_vals = {scale, scale};
                 float2 result;
 
-#if defined(__gfx906__) || defined(__gfx908__) || defined(__gfx90a__) || \
-    defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__) || \
-    defined(__gfx950__)
+#if defined(__gfx90a__) || defined(__gfx940__) || defined(__gfx941__) || \
+    defined(__gfx942__) || defined(__gfx950__)
                 asm volatile("v_pk_mul_f32 %0, %1, %2\n\t"
                              "v_pk_mul_f32 %0, %0, %3"
                              : "=v"(result)
                              : "v"(act_vals), "v"(y_vals), "v"(scale_vals));
 #else
-                // RDNA archs lack `v_pk_mul_f32`; portable fallback emits two
-                // pairs of `v_mul_f32`.
+                // gfx908 and RDNA archs lack `v_pk_mul_f32`; portable fallback
+                // emits two pairs of `v_mul_f32`.
                 result.x = act_vals.x * y_vals.x * scale_vals.x;
                 result.y = act_vals.y * y_vals.y * scale_vals.y;
 #endif
@@ -568,12 +565,11 @@ __global__ void act_and_mul_quant_kernel(
             opus::fp32x2_t a      = {act_x0, act_x1};
             opus::fp32x2_t b      = {y0, y1};
             opus::fp32x2_t c;
-#if defined(__gfx906__) || defined(__gfx908__) || defined(__gfx90a__) || \
-    defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__) || \
-    defined(__gfx950__)
+#if defined(__gfx90a__) || defined(__gfx940__) || defined(__gfx941__) || \
+    defined(__gfx942__) || defined(__gfx950__)
             asm volatile("v_pk_mul_f32 %0, %1, %2" : "=v"(c) : "v"(a), "v"(b));
 #else
-            // RDNA archs lack `v_pk_mul_f32`; portable fallback.
+            // gfx908 and RDNA archs lack `v_pk_mul_f32`; portable fallback.
             c.x = a.x * b.x;
             c.y = a.y * b.y;
 #endif

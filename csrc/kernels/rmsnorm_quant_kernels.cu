@@ -152,15 +152,14 @@ __global__ void add_rmsnorm_quant_kernel(
             vec2_f* thread_data_float2 = reinterpret_cast<vec2_f*>(&thread_data_float);
             for(int i = 0; i < thread_data_size / 2; i++)
             {
-#if defined(__gfx906__) || defined(__gfx908__) || defined(__gfx90a__) || \
-    defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__) || \
-    defined(__gfx950__)
+#if defined(__gfx90a__) || defined(__gfx940__) || defined(__gfx941__) || \
+    defined(__gfx942__) || defined(__gfx950__)
                 asm volatile("v_pk_mul_f32 %0, %1, %2"
                              : "=v"(thread_data_float2[i])
                              : "v"(thread_data_float2[i]), "v"(rcp));
 #else
-                // RDNA archs lack `v_pk_mul_f32`; fall back to portable
-                // element-wise multiplies (compiler emits two v_mul_f32).
+                // gfx908 and RDNA archs lack `v_pk_mul_f32`; fall back to
+                // portable element-wise multiplies.
                 thread_data_float2[i][0] *= rcp[0];
                 thread_data_float2[i][1] *= rcp[1];
 #endif
@@ -191,15 +190,14 @@ __global__ void add_rmsnorm_quant_kernel(
                 //         : "v"(thread_data_weight2[i])
                 //     );
                 // }
-#if defined(__gfx906__) || defined(__gfx908__) || defined(__gfx90a__) || \
-    defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__) || \
-    defined(__gfx950__)
+#if defined(__gfx90a__) || defined(__gfx940__) || defined(__gfx941__) || \
+    defined(__gfx942__) || defined(__gfx950__)
                 asm volatile("v_pk_mul_f32 %0, %1, %2"
                              : "=v"(thread_data_float2[i])
                              : "v"(thread_data_float2[i]),
                                "v"(thread_data_weight_float2));
 #else
-                // RDNA archs lack `v_pk_mul_f32`; portable fallback.
+                // gfx908 and RDNA archs lack `v_pk_mul_f32`; portable fallback.
                 thread_data_float2[i][0] *= thread_data_weight_float2[0];
                 thread_data_float2[i][1] *= thread_data_weight_float2[1];
 #endif

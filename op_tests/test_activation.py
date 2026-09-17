@@ -13,6 +13,14 @@ from aiter.test_common import benchmark, checkAllclose, run_perftest
 from aiter.utility import fp4_utils
 
 
+def format_dataframe(df: pd.DataFrame) -> str:
+    """Use Markdown when available, without requiring pandas' tabulate extra."""
+    try:
+        return df.to_markdown(index=False)
+    except ImportError:
+        return df.to_string(index=False)
+
+
 def torch_silu_and_mul(input: torch.Tensor, limit: float = 0.0) -> torch.Tensor:
     d = input.shape[-1] // 2
     x, y = input.split([d, d], dim=-1)
@@ -452,18 +460,25 @@ parser.add_argument(
 
 args = parser.parse_args()
 
-df = []
-for dtype in args.dtype:
-    for m in args.m:
-        for n in args.n:
-            ret = test_scaled_silu_and_mul(m, n, dtype)
-            df.append(ret)
-df = pd.DataFrame(df)
-df = df[
-    ["M", "N", "input_dtype", "output_dtype", "us", "TB/s", "RD TB/s", "WR TB/s", "err"]
-]
-df_md = df.to_markdown(index=False)
-aiter.logger.info("scaled_silu_and_mul summary (markdown):\n%s", df_md)
+has_native_fp8 = dtypes.fp8 != torch.uint8
+
+if has_native_fp8:
+    df = []
+    for dtype in args.dtype:
+        for m in args.m:
+            for n in args.n:
+                ret = test_scaled_silu_and_mul(m, n, dtype)
+                df.append(ret)
+    df = pd.DataFrame(df)
+    df = df[
+        ["M", "N", "input_dtype", "output_dtype", "us", "TB/s", "RD TB/s", "WR TB/s", "err"]
+    ]
+    df_md = format_dataframe(df)
+    aiter.logger.info("scaled_silu_and_mul summary (markdown):\n%s", df_md)
+else:
+    aiter.logger.info(
+        "skip scaled_silu_and_mul: this GPU has no native FP8 dtype"
+    )
 
 df = []
 for dtype in args.dtype:
@@ -482,7 +497,7 @@ df = df[
     ["M", "N", "input_dtype", "output_dtype", "us", "TB/s", "RD TB/s", "WR TB/s", "err"]
 ]
 
-df_md = df.to_markdown(index=False)
+df_md = format_dataframe(df)
 aiter.logger.info("silu_and_mul summary (markdown):\n%s", df_md)
 
 df = []
@@ -506,7 +521,7 @@ df = df[
         "err",
     ]
 ]
-df_md = df.to_markdown(index=False)
+df_md = format_dataframe(df)
 aiter.logger.info("silu_and_mul with limit=10.0 summary (markdown):\n%s", df_md)
 
 quant_cols = [
@@ -526,20 +541,25 @@ quant_cols = [
 ]
 
 # silu_and_mul_quant with fp8 (group_size=64, 128)
-df = []
-for dtype in args.dtype:
-    for m in args.m:
-        for n in args.n:
-            for gs in [64, 128]:
-                d = n // 2
-                if d >= gs and d % gs == 0:
-                    ret = test_silu_and_mul_quant(m, n, dtype, group_size=gs)
-                    df.append(ret)
-if df:
-    df = pd.DataFrame(df)
-    df = df[quant_cols]
-    df_md = df.to_markdown(index=False)
-    aiter.logger.info("silu_and_mul_quant (fp8) summary (markdown):\n%s", df_md)
+if has_native_fp8:
+    df = []
+    for dtype in args.dtype:
+        for m in args.m:
+            for n in args.n:
+                for gs in [64, 128]:
+                    d = n // 2
+                    if d >= gs and d % gs == 0:
+                        ret = test_silu_and_mul_quant(m, n, dtype, group_size=gs)
+                        df.append(ret)
+    if df:
+        df = pd.DataFrame(df)
+        df = df[quant_cols]
+        df_md = format_dataframe(df)
+        aiter.logger.info("silu_and_mul_quant (fp8) summary (markdown):\n%s", df_md)
+else:
+    aiter.logger.info(
+        "skip silu_and_mul_quant (fp8): this GPU has no native FP8 dtype"
+    )
 
 # silu_and_mul_quant with fp4 (group_size=32)
 # FP4 (e2m1) output uses CDNA4-only MFMA and is compiled in only for
@@ -566,26 +586,29 @@ else:
     if df:
         df = pd.DataFrame(df)
         df = df[quant_cols]
-        df_md = df.to_markdown(index=False)
+        df_md = format_dataframe(df)
         aiter.logger.info("silu_and_mul_quant (fp4) summary (markdown):\n%s", df_md)
 
 # silu_and_mul_quant with fp8 + limit=10
-df = []
-for dtype in args.dtype:
-    for m in args.m:
-        for n in args.n:
-            d = n // 2
-            gs = 128
-            if d >= gs and d % gs == 0:
-                ret = test_silu_and_mul_quant(m, n, dtype, group_size=gs, limit=10.0)
-                df.append(ret)
-if df:
-    df = pd.DataFrame(df)
-    df = df[quant_cols + ["limit"]]
-    df_md = df.to_markdown(index=False)
-    aiter.logger.info(
-        "silu_and_mul_quant (fp8, limit=10) summary (markdown):\n%s", df_md
-    )
+if has_native_fp8:
+    df = []
+    for dtype in args.dtype:
+        for m in args.m:
+            for n in args.n:
+                d = n // 2
+                gs = 128
+                if d >= gs and d % gs == 0:
+                    ret = test_silu_and_mul_quant(
+                        m, n, dtype, group_size=gs, limit=10.0
+                    )
+                    df.append(ret)
+    if df:
+        df = pd.DataFrame(df)
+        df = df[quant_cols + ["limit"]]
+        df_md = format_dataframe(df)
+        aiter.logger.info(
+            "silu_and_mul_quant (fp8, limit=10) summary (markdown):\n%s", df_md
+        )
 
 df = []
 for dtype in args.dtype:
@@ -610,7 +633,7 @@ df = df[
         "err",
     ]
 ]
-df_md = df.to_markdown(index=False)
+df_md = format_dataframe(df)
 aiter.logger.info("gelu_fast summary (markdown):\n%s", df_md)
 
 df = []

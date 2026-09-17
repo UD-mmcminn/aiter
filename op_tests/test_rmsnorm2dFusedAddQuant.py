@@ -20,6 +20,14 @@ torch.set_default_device("cuda")
 _FP4_OUTPUT_GUARD_VALUE = 0xA5
 
 
+def format_dataframe(df: pd.DataFrame) -> str:
+    """Use Markdown when available, without requiring pandas' tabulate extra."""
+    try:
+        return df.to_markdown(index=False)
+    except ImportError:
+        return df.to_string(index=False)
+
+
 @perftest(num_warmup=0, num_iters=10)
 def run_torch(
     input,
@@ -395,5 +403,5 @@ if __name__ == "__main__":
                 )
             df.append(ret)
     df = pd.DataFrame(df)
-    df_md = df.to_markdown(index=False)
+    df_md = format_dataframe(df)
     aiter.logger.info("rmsnorm2d summary (markdown):\n%s", df_md)
