@@ -34,6 +34,7 @@ using bf16_t = hip_bfloat16;
 using bit16_t = uint16_t;
 using int32x4_t = __attribute__((__vector_size__(4 * sizeof(int32_t)))) int32_t;
 using floatx4 = __attribute__((__vector_size__(4 * sizeof(float)))) float;
+using bit16x2 = __attribute__((__vector_size__(2 * sizeof(uint16_t)))) uint16_t;
 using bit16x4 = __attribute__((__vector_size__(4 * sizeof(uint16_t)))) uint16_t;
 using bit16x8 = __attribute__((__vector_size__(8 * sizeof(uint16_t)))) uint16_t;
 using _B16x4 = bit16x4;
@@ -334,6 +335,18 @@ __device__ __forceinline__ floatx4 mfma16x16x16_bf16(const _B16x4& a, const _B16
 {
 #if defined(__gfx1200__) || defined(__gfx1201__)
     return __builtin_amdgcn_wmma_f32_16x16x16_bf16_w64_gfx12(a, b, c);
+#elif defined(__gfx908__)
+    // CDNA1 has the 16x16x8 BF16 MFMA but not the 16x16x16 form used by
+    // newer CDNA targets. Split each packed K=16 lane fragment into its two
+    // consecutive K=8 halves and accumulate both into the output fragment.
+    const bit16x2 a_lo{a[0], a[1]};
+    const bit16x2 a_hi{a[2], a[3]};
+    const bit16x2 b_lo{b[0], b[1]};
+    const bit16x2 b_hi{b[2], b[3]};
+    floatx4 out = c;
+    out = __builtin_amdgcn_mfma_f32_16x16x8bf16(a_lo, b_lo, out, 0, 0, 0);
+    out = __builtin_amdgcn_mfma_f32_16x16x8bf16(a_hi, b_hi, out, 0, 0, 0);
+    return out;
 #else
     return __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(a, b, c, 0, 0, 0);
 #endif
