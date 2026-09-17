@@ -74,6 +74,7 @@ def get_gfx():
 
 
 _LDS_CAPACITY_BYTES = {
+    "gfx908": 64 * 1024,
     "gfx90a": 64 * 1024,
     "gfx942": 64 * 1024,
     "gfx950": 160 * 1024,

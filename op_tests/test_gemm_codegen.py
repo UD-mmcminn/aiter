@@ -9,6 +9,7 @@ Covers:
   - gen_instances filter: CSV row selection per (gfx, cu_num) target
   - write_lookup_header: C++ key format in generated lookup headers
   - Runtime dispatch key selection in gemm_op_a8w8.py et al.
+  - gfx908 Triton BF16 GEMM config and LDS metadata
 
 No GPU kernel execution or .so compilation required.  All tests run on CPU
 using only pandas and the chip_info / gemm_op_a8w8 Python layers.
@@ -18,13 +19,16 @@ Scenarios:
   2. gen_instances filter — CSV row selection per target GPU
   3. write_lookup_header — C++ key format in generated lookup header
   4. Runtime dispatch key selection — (gfx, cu_num, M, N, K) lookup
+  8. gfx908 Triton BF16 GEMM bring-up config
 
 Usage:
     python op_tests/test_gemm_codegen.py
     GPU_ARCHS=gfx942 python op_tests/test_gemm_codegen.py
 """
 
+import ast
 import contextlib
+import json
 import os
 import sys
 import tempfile
@@ -59,6 +63,7 @@ REPRO_BPRESHUFFLE_CSV = os.path.join(
 TARGET_A = ("gfx942", 304)  # MI300X
 TARGET_B = ("gfx950", 256)  # MI350
 TARGET_C = ("gfx942", 80)  # MI308X — gfx942 with CU_NUM override
+TARGET_D = ("gfx908", 120)  # MI100
 
 # ---------------------------------------------------------------------------
 # Minimal test harness (no external test framework required)
@@ -119,7 +124,12 @@ def test_get_build_targets():
         t = get_build_targets_env()
         _check(f"GPU_ARCHS={TARGET_B[0]} → [{TARGET_B}]", t == [TARGET_B], str(t))
 
-        # 1.4 Multi-arch (semicolon-separated)
+        # 1.4 MI100 resolves without requiring a live GPU or CU_NUM override
+        os.environ["GPU_ARCHS"] = TARGET_D[0]
+        t = get_build_targets_env()
+        _check(f"GPU_ARCHS={TARGET_D[0]} → [{TARGET_D}]", t == [TARGET_D], str(t))
+
+        # 1.5 Multi-arch (semicolon-separated)
         os.environ["GPU_ARCHS"] = f"{TARGET_A[0]};{TARGET_B[0]}"
         t = get_build_targets_env()
         _check(
@@ -128,7 +138,7 @@ def test_get_build_targets():
             str(t),
         )
 
-        # 1.5 Unknown arch raises RuntimeError
+        # 1.6 Unknown arch raises RuntimeError
         os.environ["GPU_ARCHS"] = "gfx999"
         raised = False
         try:
@@ -137,7 +147,7 @@ def test_get_build_targets():
             raised = True
         _check("GPU_ARCHS=gfx999 → RuntimeError", raised)
 
-        # 1.6 Separator-only GPU_ARCHS raises RuntimeError
+        # 1.7 Separator-only GPU_ARCHS raises RuntimeError
         os.environ["GPU_ARCHS"] = " ; "
         raised = False
         try:
@@ -146,13 +156,13 @@ def test_get_build_targets():
             raised = True
         _check("GPU_ARCHS=' ; ' → RuntimeError", raised)
 
-        # 1.7 GFX_CU_NUM_MAP covers at least the two known production targets
+        # 1.8 GFX_CU_NUM_MAP covers the production and MI100 bring-up targets
         _check(
-            "GFX_CU_NUM_MAP contains gfx942 and gfx950",
-            "gfx942" in GFX_CU_NUM_MAP and "gfx950" in GFX_CU_NUM_MAP,
+            "GFX_CU_NUM_MAP contains gfx908, gfx942 and gfx950",
+            all(gfx in GFX_CU_NUM_MAP for gfx in ("gfx908", "gfx942", "gfx950")),
         )
 
-        # 1.8 Live GPU fallback — requires torch and a GPU; skipped otherwise
+        # 1.9 Live GPU fallback — requires torch and a GPU; skipped otherwise
         del os.environ["GPU_ARCHS"]
         try:
             from aiter.jit.utils.chip_info import get_build_targets
@@ -939,6 +949,96 @@ def test_build_tune_dict_strict_unknown_kernel():
             del os.environ["CU_NUM"]
 
 
+def test_gfx908_triton_bf16_config():
+    _section("8. gfx908 Triton BF16 GEMM bring-up config")
+
+    config_path = os.path.join(
+        _REPO_ROOT,
+        "aiter",
+        "ops",
+        "triton",
+        "configs",
+        "gfx908",
+        "triton",
+        "gemm",
+        "gemm_a16w16",
+        "DEFAULT.json",
+    )
+    with open(config_path) as file:
+        config = json.load(file)
+
+    routes = {key: value for key, value in config.items() if key != "_note"}
+    _check(
+        "gfx908 GEMM-A16W16 has small-M and general routes",
+        set(routes) == {"M_LEQ_16", "M_LEQ_64", "any"},
+        str(sorted(routes)),
+    )
+
+    required = {
+        "BLOCK_SIZE_M",
+        "BLOCK_SIZE_N",
+        "BLOCK_SIZE_K",
+        "GROUP_SIZE_M",
+        "num_warps",
+        "num_stages",
+        "waves_per_eu",
+        "matrix_instr_nonkdim",
+        "cache_modifier",
+        "NUM_KSPLIT",
+        "kpack",
+    }
+    _check(
+        "every gfx908 route supplies the complete Triton launch config",
+        all(required <= set(route) for route in routes.values()),
+    )
+    _check(
+        "gfx908 BF16 GEMM uses the supported 16x16 MFMA family",
+        all(route["matrix_instr_nonkdim"] == 16 for route in routes.values()),
+    )
+    _check(
+        "gfx908 bring-up avoids split-K atomic accumulation",
+        all(route["NUM_KSPLIT"] == 1 for route in routes.values()),
+    )
+    _check(
+        "gfx908 operand tiles fit within 64 KiB LDS",
+        all(
+            2
+            * route["num_stages"]
+            * route["BLOCK_SIZE_K"]
+            * (route["BLOCK_SIZE_M"] + route["BLOCK_SIZE_N"])
+            <= 65536
+            for route in routes.values()
+        ),
+    )
+
+    arch_info_path = os.path.join(
+        _REPO_ROOT,
+        "aiter",
+        "ops",
+        "triton",
+        "utils",
+        "_triton",
+        "arch_info.py",
+    )
+    with open(arch_info_path) as file:
+        tree = ast.parse(file.read(), filename=arch_info_path)
+    lds_caps = None
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if any(
+            isinstance(target, ast.Name) and target.id == "_LDS_CAP_BYTES"
+            for target in node.targets
+        ):
+            lds_caps = ast.literal_eval(node.value)
+            break
+    _check(
+        "Triton architecture metadata records MI100's 64 KiB LDS",
+        lds_caps is not None and lds_caps.get("gfx908") == 65536,
+        str(lds_caps),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -962,6 +1062,7 @@ if __name__ == "__main__":
     test_runtime_dispatch_key()
     test_blockscale_kernel_name_forwarding()
     test_build_tune_dict_strict_unknown_kernel()
+    test_gfx908_triton_bf16_config()
 
     print(f"\n{'='*60}")
     print(f"  Results: {_passed} passed, {_failed} failed")
