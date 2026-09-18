@@ -1716,8 +1716,8 @@ struct BinaryOperationPattern<3, Operation, _T0, _T1>
                                                                rows,
                                                                Operation,
                                                                false,
-                                                               _T0,
-                                                               _T1>
+                                                               _T1,
+                                                               _T0>
                             <<<grid_dim, block_dim, 0, stream>>>(
                                 buf_b, buf_a, buf_c, M, N, K, types_match);
                     });
@@ -1735,11 +1735,11 @@ struct BinaryOperationPattern<3, Operation, _T0, _T1>
                                                                BIG_TILE_SIZE_K,
                                                                M_SWIZZLE,
                                                                Operation,
-                                                               true,
-                                                               _T0,
-                                                               _T1>
+                                                               false,
+                                                               _T1,
+                                                               _T0>
                             <<<grid_dim, block_dim, 0, stream>>>(
-                                buf_a, buf_b, buf_c, K, N, types_match);
+                                buf_b, buf_a, buf_c, K, N, types_match);
                     });
             }
             else
@@ -1752,11 +1752,11 @@ struct BinaryOperationPattern<3, Operation, _T0, _T1>
                                                                BIG_TILE_SIZE_K,
                                                                M_SWIZZLE,
                                                                Operation,
-                                                               false,
-                                                               _T1,
-                                                               _T0>
+                                                               true,
+                                                               _T0,
+                                                               _T1>
                             <<<grid_dim, block_dim, 0, stream>>>(
-                                buf_b, buf_a, buf_c, K, N, types_match);
+                                buf_a, buf_b, buf_c, K, N, types_match);
                     });
             }
         }

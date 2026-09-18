@@ -1,313 +1,278 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 
+"""Correctness coverage for AITER's generated binary operators.
+
+The legacy filename is retained because CI and test-splitting metadata reference it.
+"""
+
 import argparse
+from dataclasses import dataclass
 
 import torch
-from torch.profiler import ProfilerActivity, profile
 
 import aiter
-from aiter import dtypes
-from aiter.test_common import checkAllclose
+from aiter.jit.utils.chip_info import get_gfx
+from aiter.ops import aiter_operator as operator_impl
 
-parser = argparse.ArgumentParser(
-    formatter_class=argparse.RawTextHelpFormatter,
-    description="config input of test",
-)
-parser.add_argument(
-    "-i",
-    "--input_shapes",
-    nargs="*",
-    type=dtypes.str2tuple,
-    choices=[
-        (512,),
-        (1280, 232, 256),
-        (256, 256),
-        (256, 8192),
-        (256,),
-        (1280, 32, 256),
-        (384, 256),
-        (384,),
-        (65536,),
-        (65536, 256),
-        (1, 8, 256),
-        (512, 256),
-        (1280, 532, 256),
-        (6144, 100, 96),
-        (1, 100, 96),
-        (6144, 16, 96),
-        (6144, 1, 96),
-        (6144, 289, 96),
-        (289, 1),
-        (6144, 16, 192),
-        (192,),
-        (6144, 8, 1),
-        (1,),
-    ],
-    default=[
-        (512,),
-        (1280, 232, 256),
-        (256, 256),
-        (256, 8192),
-        (256,),
-        (1280, 32, 256),
-        (384, 256),
-        (384,),
-        (65536,),
-        (65536, 256),
-        (1, 8, 256),
-        (512, 256),
-        (1280, 532, 256),
-        (6144, 100, 96),
-        (1, 100, 96),
-        (6144, 16, 96),
-        (6144, 1, 96),
-        (6144, 289, 96),
-        (289, 1),
-        (6144, 16, 192),
-        (192,),
-        (6144, 8, 1),
-        (1,),
-    ],
-    help="""Input shapes.
-    e.g.: -i 1280,232,256""",
-)
-parser.add_argument(
-    "-s",
-    "--input_strides",
-    nargs="*",
-    type=dtypes.str2tuple,
-    choices=[
-        (1,),
-        (59392, 256, 1),
-        (256, 1),
-        (8192, 1),
-        (1,),
-        (8192, 256, 1),
-        (256, 1),
-        (1,),
-        (1,),
-        (256, 1),
-        (2048, 256, 1),
-        (256, 1),
-        (136192, 256, 1),
-        (9600, 96, 1),
-        (9600, 96, 1),
-        (16 * 96, 96, 1),
-        (96, 96, 1),
-        (289 * 96, 96, 1),
-        (1, 1),
-        (16 * 192, 192, 1),
-        (1,),
-        (8, 1, 1),
-        (1,),
-    ],
-    default=[
-        (1,),
-        (59392, 256, 1),
-        (256, 1),
-        (8192, 1),
-        (1,),
-        (8192, 256, 1),
-        (256, 1),
-        (1,),
-        (1,),
-        (256, 1),
-        (2048, 256, 1),
-        (256, 1),
-        (136192, 256, 1),
-        (9600, 96, 1),
-        (9600, 96, 1),
-        (16 * 96, 96, 1),
-        (96, 96, 1),
-        (289 * 96, 96, 1),
-        (1, 1),
-        (16 * 192, 192, 1),
-        (1,),
-        (8, 1, 1),
-        (1,),
-    ],
-    help="""Input strides.
-    e.g.: -s 59392,256,1""",
-)
-parser.add_argument(
-    "-o",
-    "--other_shapes",
-    nargs="*",
-    type=dtypes.str2tuple,
-    choices=[
-        (512,),
-        (1280, 232, 256),
-        (256, 256),
-        (256, 8192),
-        (256,),
-        (1280, 32, 256),
-        (384, 256),
-        (384,),
-        (65536,),
-        (65536, 256),
-        (1, 8, 256),
-        (512, 256),
-        (1280, 532, 256),
-        (1, 100, 96),
-        (6144, 100, 96),
-        (6144, 1, 96),
-        (6144, 16, 96),
-        (289, 1),
-        (6144, 289, 96),
-        (192,),
-        (6144, 16, 192),
-        (1,),
-        (6144, 8, 1),
-    ],
-    default=[
-        (512,),
-        (1280, 232, 256),
-        (256, 256),
-        (256, 8192),
-        (256,),
-        (1280, 32, 256),
-        (384, 256),
-        (384,),
-        (65536,),
-        (65536, 256),
-        (1, 8, 256),
-        (512, 256),
-        (1280, 532, 256),
-        (1, 100, 96),
-        (6144, 100, 96),
-        (6144, 1, 96),
-        (6144, 16, 96),
-        (289, 1),
-        (6144, 289, 96),
-        (192,),
-        (6144, 16, 192),
-        (1,),
-        (6144, 8, 1),
-    ],
-    help="""Other shapes.
-    e.g.: -o 1280,232,256""",
-)
-parser.add_argument(
-    "-os",
-    "--other_strides",
-    nargs="*",
-    type=dtypes.str2tuple,
-    default=[
-        (1,),
-        (59392, 256, 1),
-        (256, 1),
-        (8192, 1),
-        (1,),
-        (8192, 256, 1),
-        (256, 1),
-        (1,),
-        (1,),
-        (256, 1),
-        (2048, 256, 1),
-        (256, 1),
-        (136192, 256, 1),
-        (9600, 96, 1),
-        (9600, 96, 1),
-        (96, 96, 1),
-        (16 * 96, 96, 1),
-        (1, 1),
-        (289 * 96, 96, 1),
-        (1,),
-        (16 * 192, 192, 1),
-        (1,),
-        (8, 1, 1),
-    ],
-    choices=[
-        (1,),
-        (59392, 256, 1),
-        (256, 1),
-        (8192, 1),
-        (1,),
-        (8192, 256, 1),
-        (256, 1),
-        (1,),
-        (1,),
-        (256, 1),
-        (2048, 256, 1),
-        (256, 1),
-        (136192, 256, 1),
-        (9600, 96, 1),
-        (9600, 96, 1),
-        (96, 96, 1),
-        (16 * 96, 96, 1),
-        (1, 1),
-        (289 * 96, 96, 1),
-        (1,),
-        (16 * 192, 192, 1),
-        (1,),
-        (8, 1, 1),
-    ],
-    help="""Other strides.
-    e.g.: -os 59392,256,1""",
+
+DTYPES = {
+    "fp16": torch.float16,
+    "bf16": torch.bfloat16,
+    "fp32": torch.float32,
+}
+
+PUBLIC_OUT = {
+    "add": aiter.add,
+    "sub": aiter.sub,
+    "mul": aiter.mul,
+    "div": aiter.div,
+}
+
+PUBLIC_INPLACE = {
+    "add": aiter.add_,
+    "sub": aiter.sub_,
+    "mul": aiter.mul_,
+    "div": aiter.div_,
+}
+
+PRIVATE_OUT = {
+    "add": operator_impl._add_kernel,
+    "sub": operator_impl._sub_kernel,
+    "mul": operator_impl._mul_kernel,
+    "div": operator_impl._div_kernel,
+}
+
+PRIVATE_INPLACE = {
+    "add": operator_impl._add_kernel_,
+    "sub": operator_impl._sub_kernel_,
+    "mul": operator_impl._mul_kernel_,
+    "div": operator_impl._div_kernel_,
+}
+
+TORCH_OUT = {
+    "add": torch.add,
+    "sub": torch.sub,
+    "mul": torch.mul,
+    "div": torch.div,
+}
+
+
+@dataclass(frozen=True)
+class Case:
+    name: str
+    input_shape: tuple[int, ...]
+    other_shape: tuple[int, ...]
+    native: bool
+    reverse: bool = False
+    transpose_input: bool = False
+    transpose_other: bool = False
+
+
+OUT_CASES = (
+    Case("contiguous", (32, 128), (32, 128), True),
+    Case("contiguous_tail", (17, 65), (17, 65), True),
+    Case("vector_aligned", (256,), (256,), True),
+    Case("broadcast_dim0", (4, 16, 64), (1, 16, 64), True),
+    Case("broadcast_dim1", (4, 16, 64), (4, 1, 64), True),
+    Case("broadcast_dim1_reverse", (4, 16, 64), (4, 1, 64), True, reverse=True),
+    Case("broadcast_dim1_unrolled", (4, 32, 128), (4, 1, 128), True),
+    Case(
+        "broadcast_dim1_unrolled_reverse",
+        (4, 32, 128),
+        (4, 1, 128),
+        True,
+        reverse=True,
+    ),
+    Case("broadcast_dim2_tail", (4, 16, 65), (4, 16, 1), True),
+    Case("broadcast_n1", (4, 16, 64), (16, 1), True),
+    Case("broadcast_m11", (4, 16, 64), (4, 1, 1), True),
+    Case("broadcast_k", (4, 32, 128), (128,), True),
+    Case("broadcast_scalar", (4, 32, 128), (1,), True),
+    Case(
+        "transpose_tail",
+        (2, 17, 65),
+        (2, 17, 65),
+        True,
+        transpose_input=True,
+    ),
+    Case("broadcast_4d_middle", (2, 3, 4, 5), (2, 1, 4, 5), True),
+    Case("vector_tail_fallback", (127,), (127,), False),
+    Case("multi_broadcast_fallback", (2, 3, 4), (1, 3, 1), False),
 )
 
-args = parser.parse_args()
+INPLACE_CASES = (
+    Case("contiguous_tail", (17, 65), (17, 65), True),
+    Case("vector_aligned", (256,), (256,), True),
+    Case("broadcast_dim0", (4, 16, 64), (1, 16, 64), True),
+    Case("broadcast_dim1", (4, 16, 64), (4, 1, 64), True),
+    Case("broadcast_dim1_unrolled", (4, 32, 128), (4, 1, 128), True),
+    Case("broadcast_dim2_tail", (4, 16, 65), (4, 16, 1), True),
+    Case("broadcast_n1", (4, 16, 64), (16, 1), True),
+    Case("broadcast_m11", (4, 16, 64), (4, 1, 1), True),
+    Case(
+        "transpose_tail",
+        (2, 17, 65),
+        (2, 17, 65),
+        True,
+        transpose_other=True,
+    ),
+    Case("vector_tail_fallback", (127,), (127,), False),
+    Case("multi_broadcast_fallback", (2, 3, 4), (1, 3, 1), False),
+)
 
-tensors0 = [
-    torch.empty_strided(shape, stride, dtype=dtypes.bf16, device="cuda")
-    for shape, stride in zip(args.input_shapes, args.input_strides)
-]
-tensors1 = [
-    torch.empty_strided(shape, stride, dtype=dtypes.bf16, device="cuda")
-    for shape, stride in zip(args.other_shapes, args.other_strides)
-]
-for tensor in tensors0:
-    tensor.copy_(torch.rand_like(tensor))
-    # tensor.fill_(1)
-for tensor in tensors1:
-    tensor.copy_(torch.rand_like(tensor))
-    # tensor.fill_(1)
 
-# tensor0 = torch.empty_strided(shape0, stride0, dtype=dtypes.bf16, device='cuda')
-# tensor1 = torch.empty_strided(shape1, stride1, dtype=dtypes.bf16, device='cuda')
-# # tensor0 = torch.empty_strided(shape0, stride0, dtype=dtypes.fp32, device='cuda')
-# # tensor1 = torch.empty_strided(shape1, stride1, dtype=dtypes.fp32, device='cuda')
-# random_data0 = torch.rand(shape0)
-# # tensor0.copy_(random_data0)
-# tensor0.fill_(0)
-# random_data1 = torch.rand(shape1)
-# # tensor1.copy_(random_data1)
-# tensor1.fill_(2)
+def make_tensor(
+    shape: tuple[int, ...], dtype: torch.dtype, transpose: bool
+) -> torch.Tensor:
+    if transpose:
+        assert len(shape) == 3
+        m, n, k = shape
+        tensor = (torch.rand((m, k, n), dtype=dtype, device="cuda") + 0.5).transpose(
+            1, 2
+        )
+        assert tensor.shape == shape
+        assert not tensor.is_contiguous() and tensor.stride(1) == 1
+        return tensor
+    return torch.rand(shape, dtype=dtype, device="cuda") + 0.5
 
-for tensor0, tensor1 in zip(tensors0, tensors1):
-    print("shape:", tensor0.size())
-    with profile(
-        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-        profile_memory=True,
-        with_stack=False,
-        with_modules=False,
-        record_shapes=True,
-    ) as prof:
-        for j in range(100):
-            # cache_flush1 = torch.randn(10000, 10000, requires_grad=True, device="cuda", dtype=dtypes.fp32).to(dtypes.i32)
-            result = torch.add(tensor0, tensor1)
-            # result_con = result.contiguous()
-    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
 
-    # Warm up outside the profiled region: the first call JIT-builds and dlopens the
-    # aiter module, which would otherwise dominate the measured CPU time.
-    aiter.add(tensor0, tensor1)
+def make_operands(
+    case: Case, input_dtype: torch.dtype, other_dtype: torch.dtype
+) -> tuple[torch.Tensor, torch.Tensor]:
+    input = make_tensor(case.input_shape, input_dtype, case.transpose_input)
+    other = make_tensor(case.other_shape, other_dtype, case.transpose_other)
+    if case.reverse:
+        input, other = other, input
+    return input, other
 
-    with profile(
-        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-        profile_memory=True,
-        with_stack=False,
-        with_modules=False,
-        record_shapes=True,
-    ) as prof:
-        for j in range(100):
-            # cache_flush1 = torch.randn(10000, 10000, requires_grad=True, device="cuda", dtype=dtypes.fp32).to(dtypes.i32)
-            # output = torch.empty_like(tensor1)
-            output = aiter.add(tensor0, tensor1)
 
-    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
-    checkAllclose(result, output, msg="add")
-    print(torch.equal(result, output))
-# print("result:", result)
-# print("output:", output)
+def assert_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
+    tolerance = (
+        1e-2
+        if actual.dtype in (torch.float16, torch.bfloat16)
+        else 1e-5
+    )
+    torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
+
+
+def run_out_case(
+    op_name: str,
+    input_dtype: torch.dtype,
+    other_dtype: torch.dtype,
+    case: Case,
+) -> float:
+    input, other = make_operands(case, input_dtype, other_dtype)
+    expected = TORCH_OUT[op_name](input, other)
+
+    native_output = torch.empty(
+        expected.shape, dtype=expected.dtype, device=expected.device
+    )
+    native = bool(PRIVATE_OUT[op_name](input, other, native_output))
+    assert native == case.native, (
+        f"routing mismatch for {case.name}: expected native={case.native}, got {native}"
+    )
+    if native:
+        assert_close(native_output, expected)
+
+    actual = PUBLIC_OUT[op_name](input, other)
+    assert_close(actual, expected)
+    return float((actual.float() - expected.float()).abs().max().item())
+
+
+def run_inplace_case(
+    op_name: str,
+    input_dtype: torch.dtype,
+    other_dtype: torch.dtype,
+    case: Case,
+) -> float:
+    input, other = make_operands(case, input_dtype, other_dtype)
+    expected = input.clone()
+    getattr(expected, f"{op_name}_")(other)
+
+    native_output = input.clone()
+    native = bool(PRIVATE_INPLACE[op_name](native_output, other))
+    assert native == case.native, (
+        f"routing mismatch for {case.name}: expected native={case.native}, got {native}"
+    )
+    if native:
+        assert_close(native_output, expected)
+
+    actual = input.clone()
+    returned = PUBLIC_INPLACE[op_name](actual, other)
+    assert returned.data_ptr() == actual.data_ptr()
+    assert_close(actual, expected)
+    return float((actual.float() - expected.float()).abs().max().item())
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Validate generated AITER binary operators and their fallbacks"
+    )
+    parser.add_argument(
+        "-d",
+        "--dtype",
+        nargs="+",
+        choices=DTYPES,
+        default=["bf16"],
+    )
+    parser.add_argument(
+        "--op",
+        nargs="+",
+        choices=PUBLIC_OUT,
+        default=list(PUBLIC_OUT),
+    )
+    parser.add_argument(
+        "--other-dtype",
+        choices=DTYPES,
+        help="use a different dtype for the second operand",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("all", "out", "inplace"),
+        default="all",
+    )
+    args = parser.parse_args()
+
+    failures = []
+    passed = 0
+    print(f"GPU: {torch.cuda.get_device_name()} ({get_gfx()})")
+    for dtype_name in args.dtype:
+        input_dtype = DTYPES[dtype_name]
+        other_dtype_name = args.other_dtype or dtype_name
+        other_dtype = DTYPES[other_dtype_name]
+        for op_name in args.op:
+            modes = []
+            if args.mode in ("all", "out"):
+                modes.append(("out", OUT_CASES, run_out_case))
+            if args.mode in ("all", "inplace"):
+                modes.append(("inplace", INPLACE_CASES, run_inplace_case))
+            for mode, cases, runner in modes:
+                for case in cases:
+                    try:
+                        max_abs = runner(
+                            op_name, input_dtype, other_dtype, case
+                        )
+                    except Exception as error:
+                        failures.append((op_name, dtype_name, mode, case, error))
+                        print(
+                            f"FAIL op={op_name} dtypes={dtype_name}/{other_dtype_name} "
+                            f"mode={mode} "
+                            f"case={case.name} native={case.native}: {error}"
+                        )
+                    else:
+                        passed += 1
+                        print(
+                            f"PASS op={op_name} dtypes={dtype_name}/{other_dtype_name} "
+                            f"mode={mode} "
+                            f"case={case.name} native={case.native} "
+                            f"max_abs={max_abs:.6g}"
+                        )
+
+    print(f"binary operator summary: {passed} passed, {len(failures)} failed")
+    if failures:
+        raise AssertionError(f"AITER binary correctness failures: {len(failures)}")
+
+
+if __name__ == "__main__":
+    main()
