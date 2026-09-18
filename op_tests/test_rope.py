@@ -370,24 +370,24 @@ def hip_rope_thd_bwd(
 @perftest()
 def hip_rope_2d_fwd(
     input,
-    height,
-    width,
     cos_h,
     sin_h,
     cos_w,
     sin_w,
+    height,
+    width,
     rotate_style,
     reuse_freqs_front_part,
     nope_first,
 ):
     return aiter.rope_2d_fwd(
         input,
-        height,
-        width,
         cos_h,
         sin_h,
         cos_w,
         sin_w,
+        height,
+        width,
         rotate_style,
         reuse_freqs_front_part,
         nope_first,
@@ -397,24 +397,24 @@ def hip_rope_2d_fwd(
 @perftest()
 def hip_rope_2d_bwd(
     output_grads,
-    height,
-    width,
     cos_h,
     sin_h,
     cos_w,
     sin_w,
+    height,
+    width,
     rotate_style,
     reuse_freqs_front_part,
     nope_first,
 ):
     return aiter.rope_2d_bwd(
         output_grads,
-        height,
-        width,
         cos_h,
         sin_h,
         cos_w,
         sin_w,
+        height,
+        width,
         rotate_style,
         reuse_freqs_front_part,
         nope_first,
@@ -1294,6 +1294,14 @@ if __name__ == "__main__":
     --compare_check    # True""",
     )
     parser.add_argument(
+        "--sections",
+        choices=("sbhd", "positions", "thd", "2d"),
+        default=("sbhd", "positions", "thd", "2d"),
+        nargs="+",
+        help="""Correctness-test sections to run. Default: all sections.
+    e.g.: --sections sbhd positions""",
+    )
+    parser.add_argument(
         "-d",
         "--dtype",
         type=str,
@@ -1438,7 +1446,7 @@ if __name__ == "__main__":
     )
 
     # Test sbhd format for both cached and uncached
-    if not args.no_check:
+    if not args.no_check and "sbhd" in args.sections:
         for (
             dtype,
             fdtype,
@@ -1462,7 +1470,7 @@ if __name__ == "__main__":
         ):
             rotary_percent = rotary_percent_and_reuse[0]
             reuse_freqs_front_part = rotary_percent_and_reuse[1]
-            nope_first = (rotary_percent >= 1.0) and rotary_percent_and_reuse[2]
+            nope_first = rotary_percent_and_reuse[2]
             freqs_ratio = 2 if reuse_freqs_front_part else 1
             input = torch.randn(
                 (s, b, h, d), dtype=dtype, device="cuda", requires_grad=True
@@ -1502,7 +1510,7 @@ if __name__ == "__main__":
             )
 
     # Test sbhd format for cached with position (and offsets)
-    if not args.no_check:
+    if not args.no_check and "positions" in args.sections:
         for (
             dtype,
             fdtype,
@@ -1530,7 +1538,7 @@ if __name__ == "__main__":
         ):
             rotary_percent = rotary_percent_and_reuse[0]
             reuse_freqs_front_part = rotary_percent_and_reuse[1]
-            nope_first = (rotary_percent >= 1.0) and rotary_percent_and_reuse[2]
+            nope_first = rotary_percent_and_reuse[2]
             freqs_ratio = 2 if reuse_freqs_front_part else 1
             freqs = torch.randn(
                 (s * 2, 1, 1, int(d * rotary_percent) // freqs_ratio),
@@ -1625,7 +1633,7 @@ if __name__ == "__main__":
             )
             rotary_percent = rotary_percent_and_reuse[0]
             reuse_freqs_front_part = rotary_percent_and_reuse[1]
-            nope_first = (rotary_percent >= 1.0) and rotary_percent_and_reuse[2]
+            nope_first = rotary_percent_and_reuse[2]
             freqs_ratio = 2 if reuse_freqs_front_part else 1
             freqs = torch.randn(
                 (s * 2, 1, 1, int(d * rotary_percent) // freqs_ratio),
@@ -1669,7 +1677,7 @@ if __name__ == "__main__":
             )
 
     # Test thd format for uncached
-    if not args.no_check:
+    if not args.no_check and "thd" in args.sections:
         cu_seqlens = torch.tensor(
             [
                 0,
@@ -1708,7 +1716,7 @@ if __name__ == "__main__":
         ):
             rotary_percent = rotary_percent_and_reuse[0]
             reuse_freqs_front_part = rotary_percent_and_reuse[1]
-            nope_first = (rotary_percent >= 1.0) and rotary_percent_and_reuse[2]
+            nope_first = rotary_percent_and_reuse[2]
             freqs_ratio = 2 if reuse_freqs_front_part else 1
             input = torch.randn(
                 (cu_seqlens[-1], h, d), dtype=dtype, device="cuda", requires_grad=True
@@ -1730,7 +1738,7 @@ if __name__ == "__main__":
             )
 
     # Test 2d image format for cached
-    if not args.no_check:
+    if not args.no_check and "2d" in args.sections:
         for dtype, fdtype, b, h, d, height, width, margin in itertools.product(
             l_dtype,
             l_dtype,
