@@ -1941,6 +1941,26 @@ def _ctypes_call(func, fc_name, md_name):
 _pybind_develop_hooks_cache = None
 
 
+def _contains_pybind_tensor(value, tensor_cls):
+    if isinstance(value, tensor_cls):
+        return True
+    if isinstance(value, (list, tuple)):
+        return any(_contains_pybind_tensor(item, tensor_cls) for item in value)
+    return False
+
+
+def _convert_pybind_tensors(value, tensor_cls, convert):
+    if isinstance(value, tensor_cls):
+        return convert(value)
+    if isinstance(value, list):
+        return [_convert_pybind_tensors(item, tensor_cls, convert) for item in value]
+    if isinstance(value, tuple):
+        return tuple(
+            _convert_pybind_tensors(item, tensor_cls, convert) for item in value
+        )
+    return value
+
+
 def _pybind_develop_hooks():
     """Everything the develop=True pybind path needs, resolved once.
 
@@ -2273,17 +2293,17 @@ def compile_ops(
                             getattr(module, "__file__", "") or "",
                             getattr(core_mod, "__file__", "") or "",
                             lambda: any(
-                                isinstance(a, tensor_cls)
+                                _contains_pybind_tensor(a, tensor_cls)
                                 for a in (*args, *kwargs.values())
                             ),
                         )
 
                     args = tuple(
-                        convert(a) if isinstance(a, tensor_cls) else a for a in args
+                        _convert_pybind_tensors(a, tensor_cls, convert) for a in args
                     )
                     if kwargs:
                         kwargs = {
-                            k: convert(v) if isinstance(v, tensor_cls) else v
+                            k: _convert_pybind_tensors(v, tensor_cls, convert)
                             for k, v in kwargs.items()
                         }
 

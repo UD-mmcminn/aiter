@@ -15,7 +15,7 @@ def swap_blocks(src: Tensor, dst: Tensor, block_mapping: Tensor) -> None: ...
 
 @compile_ops("module_cache", develop=True)
 def copy_blocks(
-    key_caches: Tensor, value_caches: Tensor, block_mapping: Tensor
+    key_caches: list[Tensor], value_caches: list[Tensor], block_mapping: Tensor
 ) -> None: ...
 
 

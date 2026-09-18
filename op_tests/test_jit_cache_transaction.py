@@ -746,6 +746,37 @@ class TestGeneratedModuleRebuild(unittest.TestCase):
         self.assertEqual(core["rebuilded_list"], build_names)
 
 
+class TestPybindArgumentConversion(unittest.TestCase):
+    def test_nested_tensor_sequences_are_converted(self):
+        class Tensor:
+            def __init__(self, value):
+                self.value = value
+
+        core = _load_functions(
+            JIT_CACHE_PATH.parents[1] / "core.py",
+            ["_contains_pybind_tensor", "_convert_pybind_tensors"],
+            {},
+        )
+        first = Tensor("first")
+        second = Tensor("second")
+        argument = [first, ("unchanged", second)]
+
+        self.assertTrue(core["_contains_pybind_tensor"](argument, Tensor))
+        converted = core["_convert_pybind_tensors"](
+            argument, Tensor, lambda tensor: f"converted:{tensor.value}"
+        )
+
+        self.assertEqual(
+            converted,
+            ["converted:first", ("unchanged", "converted:second")],
+        )
+        self.assertIsInstance(converted, list)
+        self.assertIsInstance(converted[1], tuple)
+        self.assertFalse(
+            core["_contains_pybind_tensor"](("plain", 1), Tensor)
+        )
+
+
 class TestBuildPublication(unittest.TestCase):
     def setUp(self):
         environment = mock.patch.dict(os.environ, {"AITER_REBUILD": "0"})
