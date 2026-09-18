@@ -156,7 +156,7 @@ def run_top_k_per_row_prefill(
     row_starts: torch.Tensor,
     row_ends: torch.Tensor,
     indices: torch.Tensor,
-    values: torch.Tensor,
+    values: torch.Tensor | None,
     num_rows: int,
     stride_row: int,
     stride_col: int,
@@ -326,9 +326,22 @@ def test_top_k_per_row_prefill(
         stable=stable,
         values=values,
     )
+    assert all_close, (
+        "top_k_per_row_prefill mismatch "
+        f"(num_rows={num_rows}, num_prefix={num_prefix}, top_k={top_k}, "
+        f"flydsl={flydsl}, stable={stable}, write_values={write_values}, "
+        f"data={data_generation})"
+    )
 
     # measure performance
+    ret["gfx"] = get_gfx()
     ret["context_len"] = logits.shape[1]
+    ret["num_rows"] = num_rows
+    ret["num_prefix"] = num_prefix
+    ret["top_k"] = top_k
+    ret["stable"] = stable
+    ret["write_values"] = write_values
+    ret["data"] = data_generation
     ret["all_close"] = all_close
     ret["us"] = us
     return ret
@@ -413,9 +426,23 @@ def test_top_k_per_row_decode(
         stable=stable,
         values=values,
     )
+    assert all_close, (
+        "top_k_per_row_decode mismatch "
+        f"(batch_size={batch_size}, context_len={context_len}, top_k={top_k}, "
+        f"next_n={next_n}, fast={fast}, flydsl={flydsl}, stable={stable}, "
+        f"write_values={write_values}, data={data_generation})"
+    )
 
     # measure performance
+    ret["gfx"] = get_gfx()
     ret["width"] = logits.shape[1]
+    ret["batch_size"] = batch_size
+    ret["top_k"] = top_k
+    ret["next_n"] = next_n
+    ret["stable"] = stable
+    ret["write_values"] = write_values
+    ret["flydsl"] = flydsl
+    ret["data"] = data_generation
     ret["all_close"] = all_close
     ret["us"] = us
     ret["fast"] = fast
@@ -468,6 +495,12 @@ def test_mb_workspace_reuse():
 parser = argparse.ArgumentParser(
     formatter_class=argparse.RawTextHelpFormatter,
     description="config input of test",
+)
+parser.add_argument(
+    "--mode",
+    choices=["all", "prefill", "decode"],
+    default="all",
+    help="Run both public paths or only the selected path (default: all).",
 )
 parser.add_argument(
     "-c",
@@ -533,89 +566,115 @@ parser.add_argument(
 
 args = parser.parse_args()
 
-# Self-reset / persistent-workspace regression (runs in CI via `python3 <file>`).
-test_mb_workspace_reuse()
-
-
 # Ask each path which arches it serves rather than keeping a second copy
 # here: a copy drifts, and a test that drives a kernel production never
 # dispatches reports on something nobody runs.
 one_block_available = get_gfx() in _FLYDSL_TOPK_ONE_BLOCK_ARCHES
 flydsl_decode_available = get_gfx() in _FLYDSL_TOPK_DECODE_GATES
 
-df = []
-for data_generation in args.data_generation:
-    for m in args.context_len:
-        for k in args.top_k:
-            for num_prefix in args.num_prefix:
-                ret = test_top_k_per_row_prefill(m, num_prefix, k, data_generation)
-                df.append(ret)
-                # Cover the one-block radix kernel directly, so a dispatch
-                # change cannot hide a kernel regression.
-                if not one_block_available:
-                    continue
-                for stable in (False, True):
-                    for write_values in (False, True):
-                        ret = test_top_k_per_row_prefill(
-                            m,
-                            num_prefix,
-                            k,
-                            data_generation,
-                            flydsl=True,
-                            stable=stable,
-                            write_values=write_values,
-                        )
-                        df.append(ret)
+if args.mode in ("all", "prefill"):
+    # Self-reset / persistent-workspace regression (runs in CI via
+    # `python3 <file>` whenever the prefill path is selected).
+    test_mb_workspace_reuse()
 
-df = pd.DataFrame(df)
-df_md = df.to_markdown(index=False)
-aiter.logger.info("topk_per_row_prefill summary (markdown):\n%s", df_md)
-assert df["all_close"].all(), f"topk_per_row_prefill mismatch:\n{df_md}"
-
-
-df = []
-for data_generation in args.data_generation:
-    for m in args.decode_batch_size:
-        for ctx in args.context_len:
+    rows = []
+    for data_generation in args.data_generation:
+        for m in args.context_len:
             for k in args.top_k:
-                for n in args.next_n:
+                for num_prefix in args.num_prefix:
                     for stable in (False, True):
                         for write_values in (False, True):
-                            ret = test_top_k_per_row_decode(
-                                m,
-                                ctx,
-                                k,
-                                n,
-                                data_generation,
-                                stable=stable,
-                                write_values=write_values,
-                            )
-                            df.append(ret)
-                            if flydsl_decode_available:
-                                ret = test_top_k_per_row_decode(
+                            # On arches without the one-block FlyDSL kernel,
+                            # exercise every public HIP mode. Where FlyDSL is
+                            # available, keep one public dispatch probe and
+                            # cover the kernel directly below.
+                            if not one_block_available or (
+                                not stable and not write_values
+                            ):
+                                rows.append(
+                                    test_top_k_per_row_prefill(
+                                        m,
+                                        num_prefix,
+                                        k,
+                                        data_generation,
+                                        stable=stable,
+                                        write_values=write_values,
+                                    )
+                                )
+                            if not one_block_available:
+                                continue
+                            rows.append(
+                                test_top_k_per_row_prefill(
                                     m,
-                                    ctx,
+                                    num_prefix,
                                     k,
-                                    n,
                                     data_generation,
                                     flydsl=True,
                                     stable=stable,
                                     write_values=write_values,
                                 )
-                                df.append(ret)
-                        # `_fast` ASM kernel hardcodes k=2048 and is not stable.
-                        if get_gfx() == "gfx942" and k == 2048 and not stable:
-                            ret = test_top_k_per_row_decode(
-                                m,
-                                ctx,
-                                k,
-                                n,
-                                data_generation,
-                                fast=True,
                             )
-                            df.append(ret)
 
-df = pd.DataFrame(df)
-df_md = df.to_markdown(index=False)
-aiter.logger.info("topk_per_row_decode summary (markdown):\n%s", df_md)
-assert df["all_close"].all(), f"topk_per_row_decode mismatch:\n{df_md}"
+    df = pd.DataFrame(rows)
+    try:
+        df_text = df.to_markdown(index=False)
+    except ImportError:
+        df_text = df.to_string(index=False)
+    aiter.logger.info("topk_per_row_prefill summary (markdown):\n%s", df_text)
+    assert df["all_close"].all(), f"topk_per_row_prefill mismatch:\n{df_text}"
+
+
+if args.mode in ("all", "decode"):
+    rows = []
+    gfx = get_gfx()
+    for data_generation in args.data_generation:
+        for m in args.decode_batch_size:
+            for ctx in args.context_len:
+                for k in args.top_k:
+                    for n in args.next_n:
+                        for stable in (False, True):
+                            for write_values in (False, True):
+                                rows.append(
+                                    test_top_k_per_row_decode(
+                                        m,
+                                        ctx,
+                                        k,
+                                        n,
+                                        data_generation,
+                                        stable=stable,
+                                        write_values=write_values,
+                                    )
+                                )
+                                if flydsl_decode_available:
+                                    rows.append(
+                                        test_top_k_per_row_decode(
+                                            m,
+                                            ctx,
+                                            k,
+                                            n,
+                                            data_generation,
+                                            flydsl=True,
+                                            stable=stable,
+                                            write_values=write_values,
+                                        )
+                                    )
+                        # `_fast` ASM kernel hardcodes k=2048 and is not stable.
+                        if gfx == "gfx942" and k == 2048:
+                            rows.append(
+                                test_top_k_per_row_decode(
+                                    m,
+                                    ctx,
+                                    k,
+                                    n,
+                                    data_generation,
+                                    fast=True,
+                                )
+                            )
+
+    df = pd.DataFrame(rows)
+    try:
+        df_text = df.to_markdown(index=False)
+    except ImportError:
+        df_text = df.to_string(index=False)
+    aiter.logger.info("topk_per_row_decode summary (markdown):\n%s", df_text)
+    assert df["all_close"].all(), f"topk_per_row_decode mismatch:\n{df_text}"
