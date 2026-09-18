@@ -687,6 +687,65 @@ class TestModuleBuildLock(unittest.TestCase):
                     baton.release.assert_called_once()
 
 
+class TestGeneratedModuleRebuild(unittest.TestCase):
+    def test_rebuild_is_keyed_by_generated_module_name(self):
+        build_names = []
+
+        def build_module(*args, **_kwargs):
+            build_names.append(args[0])
+            raise RuntimeError("build requested")
+
+        build_args = {
+            "srcs": [],
+            "flags_extra_cc": [],
+            "flags_extra_hip": [],
+            "blob_gen_cmd": "",
+            "extra_include": [],
+            "extra_ldflags": [],
+            "verbose": False,
+            "is_python_module": True,
+            "is_standalone": False,
+            "torch_exclude": True,
+            "third_party": [],
+        }
+        core = _load_functions(
+            JIT_CACHE_PATH.parents[1] / "core.py",
+            ["_mark_module_for_rebuild", "compile_ops"],
+            {
+                "Any": object,
+                "Callable": Callable,
+                "AITER_LOG_MORE": 0,
+                "AITER_REBUILD": 1,
+                "Optional": object,
+                "__mds": {},
+                "build_module": build_module,
+                "functools": __import__("functools"),
+                "get_args_of_build": lambda _name: dict(build_args),
+                "get_module": lambda _name: None,
+                "os": os,
+                "rebuilded_list": [],
+                "torch_compile_guard": lambda **_kwargs: lambda wrapped: wrapped,
+                "types": types,
+                "typing": __import__("typing"),
+            },
+        )
+
+        generated_op = core["compile_ops"](
+            "module_base",
+            fc_name="op",
+            gen_func=lambda suffix: {"md_name": f"module_generated_{suffix}"},
+        )(lambda _suffix: None)
+
+        for suffix in ("one", "two"):
+            with self.assertRaisesRegex(RuntimeError, "build requested"):
+                generated_op(suffix)
+
+        self.assertEqual(
+            build_names, ["module_generated_one", "module_generated_two"]
+        )
+        self.assertEqual(core["rebuilded_list"], build_names)
+
+
 class TestBuildPublication(unittest.TestCase):
     def setUp(self):
         environment = mock.patch.dict(os.environ, {"AITER_REBUILD": "0"})

@@ -955,6 +955,14 @@ def get_module(md_name):
 rebuilded_list = []
 
 
+def _mark_module_for_rebuild(md_name: str) -> bool:
+    """Return whether this module needs its once-per-process forced rebuild."""
+    if not AITER_REBUILD or md_name in rebuilded_list:
+        return False
+    rebuilded_list.append(md_name)
+    return True
+
+
 def clone_3rdparty(third_party: str) -> None:
     def MainFunc():
         if not os.path.exists(dir_path):
@@ -2002,12 +2010,11 @@ def compile_ops(
                     module = None
                     if gen_func is not None:
                         custom_build_args.update(gen_func(*args, **kwargs))
-                    elif AITER_REBUILD and md_name not in rebuilded_list:
-                        rebuilded_list.append(md_name)
+                    generated_md_name = custom_build_args.get("md_name", md_name)
+                    if _mark_module_for_rebuild(generated_md_name):
                         raise ModuleNotFoundError("start rebuild")
                     if module is None:
-                        md = custom_build_args.get("md_name", md_name)
-                        module = get_module(md)
+                        module = get_module(generated_md_name)
                 except ModuleNotFoundError:
                     d_args = get_args_of_build(md_name)
                     d_args.update(custom_build_args)
