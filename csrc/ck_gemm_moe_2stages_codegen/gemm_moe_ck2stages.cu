@@ -159,8 +159,10 @@ void ck_moe_stage2(torch::Tensor &inter_states,      // [m, k], input token
                    bool is_shuffled = true)
 {
     // std::cerr << __FILE__ << ":" << __LINE__ << " ck_moe_stage2 called!" << nt << " " << block_m.value() << std::endl;
-    TORCH_CHECK(out.dtype() == at::ScalarType::BFloat16 || out.dtype() == at::ScalarType::Half,
-                "Out dtype only support BFloat16/Float16!")
+    TORCH_CHECK(out.dtype() == at::ScalarType::BFloat16 ||
+                    out.dtype() == at::ScalarType::Half ||
+                    out.dtype() == at::ScalarType::Float,
+                "Out dtype only supports BFloat16/Float16/Float32!")
 
     int32_t splitk_local = splitk.has_value() ? splitk.value() : 1;
 

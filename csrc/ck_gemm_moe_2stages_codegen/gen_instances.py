@@ -862,6 +862,7 @@ class ck_moe_2stage_gemm_codegen:
         mul_routed_weight_stage,
         preshuffle,
         splitk,
+        stage2_only=False,
     ):
         self.working_path = working_path
         self.a_dtype = a_dtype.upper()
@@ -873,19 +874,22 @@ class ck_moe_2stage_gemm_codegen:
         self.nswizzle = False
         self.preshuffle = preshuffle
         self.splitk = splitk
+        self.stage2_only = stage2_only
 
     def generate_instance_and_lookUpTable(self):
-        _, gemm1_kernel_list = get_gemm1_kernels_list(
-            self.a_dtype,
-            self.b_dtype,
-            self.c_dtype,
-            self.nswizzle,
-            self.quant_type,
-            self.activation,
-            self.mul_routed_weight_stage == 1,
-            self.preshuffle,
-            self.splitk,
-        )
+        gemm1_kernel_list = {}
+        if not self.stage2_only:
+            _, gemm1_kernel_list = get_gemm1_kernels_list(
+                self.a_dtype,
+                self.b_dtype,
+                self.c_dtype,
+                self.nswizzle,
+                self.quant_type,
+                self.activation,
+                self.mul_routed_weight_stage == 1,
+                self.preshuffle,
+                self.splitk,
+            )
         tag, gemm2_kernel_list = get_gemm2_kernels_list(
             self.a_dtype,
             self.b_dtype,
@@ -985,21 +989,22 @@ class ck_moe_2stage_gemm_codegen:
         gemm1_heuristic_dispatch, gemm2_heuristic_dispatch = heuristic_dispatch_dict[
             tag
         ]
-        with open(f_gemm1_heuristic_dispatch, "a") as f_h:
-            gemm1_fp32 = self.splitk and (quanttype == "_blockscale")
-            gemm1_heuristic_dispatch_str = gemm1_heuristic_dispatch.format(
-                A0DataType=self.a_dtype,
-                B0DataType=self.b_dtype,
-                AccDataType="F32" if self.a_dtype != "I8" else "I32",
-                EDataType="F32" if gemm1_fp32 else self.c_dtype,
-                CDEElementOp=kernel_list[0].CDEElementOp,
-                Nswizzle=str(self.nswizzle).lower(),
-                Quant=self.quant_type,
-                ActOP=str(ACT_OP_MAP[self.activation]),
-                MulRoutedWeight=str(self.mul_routed_weight_stage == 1).lower(),
-                Preshuffle=str(self.preshuffle).lower(),
-            )
-            f_h.write(gemm1_heuristic_dispatch_str)
+        if not self.stage2_only:
+            with open(f_gemm1_heuristic_dispatch, "a") as f_h:
+                gemm1_fp32 = self.splitk and (quanttype == "_blockscale")
+                gemm1_heuristic_dispatch_str = gemm1_heuristic_dispatch.format(
+                    A0DataType=self.a_dtype,
+                    B0DataType=self.b_dtype,
+                    AccDataType="F32" if self.a_dtype != "I8" else "I32",
+                    EDataType="F32" if gemm1_fp32 else self.c_dtype,
+                    CDEElementOp=next(iter(gemm1_kernel_list.values())).CDEElementOp,
+                    Nswizzle=str(self.nswizzle).lower(),
+                    Quant=self.quant_type,
+                    ActOP=str(ACT_OP_MAP[self.activation]),
+                    MulRoutedWeight=str(self.mul_routed_weight_stage == 1).lower(),
+                    Preshuffle=str(self.preshuffle).lower(),
+                )
+                f_h.write(gemm1_heuristic_dispatch_str)
 
         f_gemm2_heuristic_dispatch = os.path.join(
             self.working_path, "ck2stages_moe_stage2_heuristic_dispatch.hpp"
@@ -1010,7 +1015,7 @@ class ck_moe_2stage_gemm_codegen:
                 B0DataType=self.b_dtype,
                 AccDataType="F32" if self.a_dtype != "I8" else "I32",
                 EDataType=self.c_dtype,
-                CDEElementOp=kernel_list[-1].CDEElementOp,
+                CDEElementOp=next(iter(gemm2_kernel_list.values())).CDEElementOp,
                 Nswizzle=str(self.nswizzle).lower(),
                 Quant=self.quant_type,
                 ActOP=0,
@@ -1050,7 +1055,7 @@ if __name__ == "__main__":
         default="b16",
         required=False,
         type=str,
-        choices=["f16", "b16"],
+        choices=["f16", "b16", "f32"],
         help="select out dtype",
     )
 
@@ -1110,6 +1115,12 @@ if __name__ == "__main__":
         "--issplitk",
         action="store_true",
         help="enable moe_stage1 splitk mode",
+    )
+
+    parser.add_argument(
+        "--stage2-only",
+        action="store_true",
+        help="generate only stage2 instances and dispatch",
     )
 
     args = parser.parse_args()
@@ -1294,6 +1305,7 @@ if __name__ == "__main__":
                 args.mul_routed_weight_stage,
                 args.preshuffle,
                 args.issplitk,
+                args.stage2_only,
             )
             codegen.generate_instance_and_lookUpTable()
 

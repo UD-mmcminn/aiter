@@ -7,6 +7,7 @@ import torch
 from torch import Tensor
 
 from ..jit.core import AITER_CSRC_DIR, compile_ops
+from ..jit.utils.chip_info import get_gfx_runtime
 from ..utility import dtypes
 from .enum import ActivationType, QuantType
 
@@ -330,6 +331,7 @@ def cmdGenFunc_ck_moe_stage2(
 ):
 
     mul_routed_weight_stage = 1 if sorted_weights is None else 2
+    stage2_only = out.dtype == dtypes.fp32
     md_name, blob_gen_cmd = get_moe_stage_module(
         hidden_states.dtype,
         w1.dtype,
@@ -338,6 +340,7 @@ def cmdGenFunc_ck_moe_stage2(
         quant_type,
         mul_routed_weight_stage,
         is_shuffled,
+        stage2_only=stage2_only,
     )
     return {
         "md_name": md_name,
@@ -520,6 +523,7 @@ def moe_cktile2stages_gemm2(
 dtype2str_dict = {
     dtypes.fp16: "f16",
     dtypes.bf16: "b16",
+    dtypes.fp32: "f32",
     dtypes.fp8: "f8",
     dtypes.i8: "i8",
     dtypes.fp4x2: "fp4x2",
@@ -530,6 +534,7 @@ dtype2str_dict = {
 str2dtype_dict = {
     "f16": dtypes.fp16,
     "b16": dtypes.bf16,
+    "f32": dtypes.fp32,
 }
 
 
@@ -543,6 +548,7 @@ def get_moe_stage_module(
     mul_routed_weight_stage,
     preshuffle_mode=False,
     is_splitk=False,
+    stage2_only=False,
 ):
     if isinstance(activation, int):
         activation = ActivationType(activation)
@@ -576,9 +582,12 @@ def get_moe_stage_module(
     ]
     if is_splitk:
         parts.append("splitk")
+    if stage2_only:
+        parts.append("stage2_only")
     md_name = "_".join(parts)
+    stage2_only_str = "--stage2-only" if stage2_only else ""
     blob_gen_cmd = [
-        f"{AITER_CSRC_DIR}/ck_gemm_moe_2stages_codegen/gen_instances.py -a {Adtype} -b {Bdtype} -c {Cdtype} -q {quant_type} -act {act} -m {mul_routed_weight_stage} {preshuffle_str} {splitk_str} -w {{}}"
+        f"{AITER_CSRC_DIR}/ck_gemm_moe_2stages_codegen/gen_instances.py -a {Adtype} -b {Bdtype} -c {Cdtype} -q {quant_type} -act {act} -m {mul_routed_weight_stage} {preshuffle_str} {splitk_str} {stage2_only_str} -w {{}}"
     ]
 
     return md_name, blob_gen_cmd
@@ -646,6 +655,16 @@ def ck_moe_stage2_fwd(
     activation: ActivationType = ActivationType.Silu,
     use_non_temporal_load: bool | None = False,
 ):
+    # gfx908 has no native global BF16 atomic add. CK's MoE GEMM2 combines
+    # top-k routes with AtomicAdd, and its BF16 atomic helper is intentionally
+    # empty on architectures without that instruction. Accumulate into FP32 on
+    # MI100, where atomic add is supported, then round once into the requested
+    # BF16 destination.
+    stage2_out = out
+    use_fp32_accum = get_gfx_runtime() == "gfx908" and out.dtype == dtypes.bf16
+    if use_fp32_accum:
+        stage2_out = torch.zeros_like(out, dtype=dtypes.fp32)
+
     ck_moe_stage2(
         inter_states,
         w1,
@@ -653,7 +672,7 @@ def ck_moe_stage2_fwd(
         sorted_token_ids,
         sorted_expert_ids,
         num_valid_ids,
-        out,
+        stage2_out,
         topk,
         kernelName,
         w2_scale,
@@ -665,4 +684,6 @@ def ck_moe_stage2_fwd(
         use_non_temporal_load=use_non_temporal_load,
         is_shuffled=getattr(w2, "is_shuffled", False),
     )
+    if use_fp32_accum:
+        out.copy_(stage2_out)
     return out
