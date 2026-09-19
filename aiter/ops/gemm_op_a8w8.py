@@ -683,9 +683,24 @@ def gemm_a8w8_CK(
             splitK = ck_config["splitK"]
         else:
             splitK = 0
-    Y = torch.empty(m, n, dtype=dtype, device=XQ.device)
+
+    # The untuned CK kernels use vectorized output stores. MNKPadding pads the
+    # work tiles, but its argument check still requires the physical N stride
+    # to be a multiple of the store width (up to 8 in the default kernels).
+    # Pad only the untuned INT8 path; a tuned row may use a different kernel.
+    padded_n = n
+    if WQ.dtype == dtypes.i8 and ck_config is None and n % 8:
+        padded_n = (n + 7) // 8 * 8
+        pad_n = padded_n - n
+        WQ = F.pad(WQ, (0, 0, 0, pad_n))
+        w_scale = F.pad(w_scale, (0, 0, 0, pad_n))
+        if bias is not None:
+            bias = F.pad(bias, (0, pad_n))
+
+    Y = torch.empty(m, padded_n, dtype=dtype, device=XQ.device)
     try:
-        return gemm_a8w8_ck(XQ, WQ, x_scale, w_scale, Y, bias, splitK)
+        result = gemm_a8w8_ck(XQ, WQ, x_scale, w_scale, Y, bias, splitK)
+        return result[:, :n].contiguous() if padded_n != n else result
     except RuntimeError as e:
         raise RuntimeError(
             f"gemm_a8w8_CK failed for shape M={m}, N={n}, K={k}, "
