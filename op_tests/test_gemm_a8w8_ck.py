@@ -22,21 +22,24 @@ DEFAULT_CASES = (
     (32, 1024, 1024, True),
 )
 
+OUTPUT_DTYPES = {"bf16": dtypes.bf16, "fp16": dtypes.fp16}
+
 
 def run_case(
     m: int,
     n: int,
     k: int,
     use_bias: bool,
+    dtype: torch.dtype,
     atol: float,
     rtol: float,
 ) -> float:
-    x = torch.randn((m, k), dtype=dtypes.bf16, device="cuda") * 0.25
-    weight = torch.randn((n, k), dtype=dtypes.bf16, device="cuda") * 0.25
+    x = torch.randn((m, k), dtype=dtype, device="cuda") * 0.25
+    weight = torch.randn((n, k), dtype=dtype, device="cuda") * 0.25
     xq, x_scale = aiter.pertoken_quant(x, quant_dtype=dtypes.i8)
     wq, w_scale = aiter.pertoken_quant(weight, quant_dtype=dtypes.i8)
     bias = (
-        torch.randn((1, n), dtype=dtypes.bf16, device="cuda") * 0.25
+        torch.randn((1, n), dtype=dtype, device="cuda") * 0.25
         if use_bias
         else None
     )
@@ -47,7 +50,7 @@ def run_case(
     expected = F.linear(xq.float(), wq.float()) * w_scale.T * x_scale
     if bias is not None:
         expected = expected + bias.float()
-    expected = expected.to(dtypes.bf16)
+    expected = expected.to(dtype)
 
     # gfx9 public dispatch is the CK path. Testing the public entry point also
     # catches a future routing regression that a direct gemm_a8w8_CK call would
@@ -58,7 +61,7 @@ def run_case(
         x_scale,
         w_scale,
         bias=bias,
-        dtype=dtypes.bf16,
+        dtype=dtype,
     )
     torch.cuda.synchronize()
 
@@ -72,8 +75,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Validate the public INT8 A8W8 CK GEMM path"
     )
-    parser.add_argument("--atol", type=float, default=0.02)
-    parser.add_argument("--rtol", type=float, default=0.01)
+    parser.add_argument(
+        "-d", "--dtype", nargs="+", choices=OUTPUT_DTYPES, default=["bf16"]
+    )
+    parser.add_argument("--atol", type=float, default=None)
+    parser.add_argument("--rtol", type=float, default=None)
     args = parser.parse_args()
 
     gfx = get_gfx_runtime()
@@ -85,16 +91,28 @@ def main() -> None:
     passed = 0
     failures = []
 
-    for m, n, k, use_bias in DEFAULT_CASES:
-        case = f"M={m} N={n} K={k} bias={use_bias}"
-        try:
-            max_abs = run_case(m, n, k, use_bias, args.atol, args.rtol)
-        except Exception as error:
-            failures.append((case, error))
-            print(f"FAIL {case}: {error}")
-        else:
-            passed += 1
-            print(f"PASS {case} max_abs={max_abs:.6g}")
+    for dtype_name in args.dtype:
+        dtype = OUTPUT_DTYPES[dtype_name]
+        atol = (
+            args.atol
+            if args.atol is not None
+            else (0.02 if dtype == dtypes.bf16 else 0.002)
+        )
+        rtol = (
+            args.rtol
+            if args.rtol is not None
+            else (0.01 if dtype == dtypes.bf16 else 0.002)
+        )
+        for m, n, k, use_bias in DEFAULT_CASES:
+            case = f"dtype={dtype_name} M={m} N={n} K={k} bias={use_bias}"
+            try:
+                max_abs = run_case(m, n, k, use_bias, dtype, atol, rtol)
+            except Exception as error:
+                failures.append((case, error))
+                print(f"FAIL {case}: {error}")
+            else:
+                passed += 1
+                print(f"PASS {case} max_abs={max_abs:.6g}")
 
     print(f"CK INT8 A8W8 GEMM summary: {passed} passed, {len(failures)} failed")
     if failures:
