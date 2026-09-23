@@ -32,7 +32,7 @@ namespace py = pybind11;
         .value("Gelu", ActivationType::Gelu)                                                \
         .value("Swiglu", ActivationType::Swiglu)                                            \
         .value("Situv2", ActivationType::Situv2)                                            \
-        .value("GeluTanh", ActivationType::GeluTanh)                                         \
+        .value("GeluTanh", ActivationType::GeluTanh)                                        \
         .export_values();                                                                   \
     pybind11::enum_<MlaVersion>(m, "MlaVersion")                                            \
         .value("V32", MlaVersion::V32)                                                      \
@@ -161,6 +161,11 @@ namespace py = pybind11;
           "Activation function used in GELU fast.",      \
           py::arg("out"),                                \
           py::arg("input"));                             \
+    m.def("relu2",                                       \
+          &aiter::relu2,                                 \
+          "Plain ReLU^2 activation (no gating multiply).",\
+          py::arg("out"),                                 \
+          py::arg("input"));                              \
     m.def("gelu_tanh_and_mul",                           \
           &aiter::gelu_tanh_and_mul,                     \
           "Activation function used in GELU tanh.",      \
