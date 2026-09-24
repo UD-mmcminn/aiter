@@ -20,40 +20,27 @@
 #include <limits>
 
 namespace aiter {
-template <typename T, int VecSize, int ChunkBytes>
+// Bounds checks belong only to the final partial vector. Full vectors use the
+// normal vector load/store path so the vocabulary traversal stays branch-free.
+template <typename T, int VecSize>
 __device__ __forceinline__ opus::vector_t<T, VecSize>
-sample_load_vector(opus::gmem<T>& buffer, const T* ptr, int offset, int size)
+sample_load_tail(const T* ptr, int offset, int size, T fill)
 {
-    if(offset + VecSize <= size)
-    {
-        return load_vector_nbytes<T, VecSize, ChunkBytes>(buffer, offset);
-    }
-
-    opus::vector_t<T, VecSize> result{};
+    opus::vector_t<T, VecSize> result;
 #pragma unroll
     for(int i = 0; i < VecSize; ++i)
     {
-        if(offset + i < size)
-        {
-            result[i] = ptr[offset + i];
-        }
+        result[i] = offset + i < size ? ptr[offset + i] : fill;
     }
     return result;
 }
 
 template <typename T, int VecSize>
-__device__ __forceinline__ void sample_store_vector(opus::gmem<T>& buffer,
-                                                    T* ptr,
-                                                    const opus::vector_t<T, VecSize>& value,
-                                                    int offset,
-                                                    int size)
+__device__ __forceinline__ void sample_store_tail(T* ptr,
+                                                  const opus::vector_t<T, VecSize>& value,
+                                                  int offset,
+                                                  int size)
 {
-    if(offset + VecSize <= size)
-    {
-        store_vector<T, T, VecSize, RT, false>(buffer, value, offset, 1.0f);
-        return;
-    }
-
 #pragma unroll
     for(int i = 0; i < VecSize; ++i)
     {
@@ -102,19 +89,12 @@ __device__ void random_sample_outer_exponential_impl(const DTYPE_I* input,
         float new_max_softmax = max_softmax;
         for(int i = 0; i < vec_size_i; i++)
         {
-            if(offset + i < N)
-            {
-                vec_cur_f[i]    = opus::cast<float>(vec_inp[i]) * temperature;
-                new_max_softmax = max(new_max_softmax, vec_cur_f[i]);
-            }
-            else
-            {
-                vec_cur_f[i] = -FLT_MAX;
-            }
+            vec_cur_f[i]    = opus::cast<float>(vec_inp[i]) * temperature;
+            new_max_softmax = max(new_max_softmax, vec_cur_f[i]);
         }
         for(int i = 0; i < vec_size_i; i++)
         {
-            vec_cur_f[i] = offset + i < N ? expf(vec_cur_f[i] - new_max_softmax) : 0.0f;
+            vec_cur_f[i] = expf(vec_cur_f[i] - new_max_softmax);
         }
         float ratio      = expf(max_softmax - new_max_softmax);
         thread_kvp.value = thread_kvp.value * ratio;
@@ -131,38 +111,45 @@ __device__ void random_sample_outer_exponential_impl(const DTYPE_I* input,
 
         for(int i = 0; i < vec_size_i; i++)
         {
-            if(offset + i < N)
+            vec_cur_f[i] = vec_cur_f[i] / (vec_exp[i] + eps);
+            if(vec_cur_f[i] > thread_kvp.value)
             {
-                vec_cur_f[i] = vec_cur_f[i] / (vec_exp[i] + eps);
-                if(vec_cur_f[i] > thread_kvp.value)
-                {
-                    thread_kvp.key   = offset + i;
-                    thread_kvp.value = vec_cur_f[i];
-                }
+                thread_kvp.key   = offset + i;
+                thread_kvp.value = vec_cur_f[i];
             }
         }
     };
 
     int offset           = threadIdx.x * vec_size_i;
     const int vec_stride = BlockSize * vec_size_i;
-    if(offset < N)
+    if(offset + vec_size_i <= N)
     {
-        vec_i vec_inp_pre = sample_load_vector<DTYPE_I, vec_size_i, load_chunk_bytes>(
-            buffer_i, ptr_i, offset, N);
-        vec_f vec_exp_pre = sample_load_vector<float, vec_size_i, sizeof(float) * vec_size_i>(
-            buffer_e, ptr_e, offset, N);
-        for(int next = offset + vec_stride; next < N; next += vec_stride)
+        vec_i vec_inp_pre =
+            load_vector_nbytes<DTYPE_I, vec_size_i, load_chunk_bytes>(buffer_i, offset);
+        vec_f vec_exp_pre =
+            load_vector_nbytes<float, vec_size_i, sizeof(float) * vec_size_i>(buffer_e, offset);
+        int next = offset + vec_stride;
+        for(; next + vec_size_i <= N; next += vec_stride)
         {
-            vec_i vec_inp_cur = sample_load_vector<DTYPE_I, vec_size_i, load_chunk_bytes>(
-                buffer_i, ptr_i, next, N);
-            vec_f vec_exp_cur = sample_load_vector<float, vec_size_i, sizeof(float) * vec_size_i>(
-                buffer_e, ptr_e, next, N);
+            vec_i vec_inp_cur =
+                load_vector_nbytes<DTYPE_I, vec_size_i, load_chunk_bytes>(buffer_i, next);
+            vec_f vec_exp_cur = load_vector_nbytes<float,
+                                                   vec_size_i,
+                                                   sizeof(float) * vec_size_i>(buffer_e, next);
             loop(vec_inp_pre, vec_exp_pre, offset);
             vec_inp_pre = vec_inp_cur;
             vec_exp_pre = vec_exp_cur;
             offset      = next;
         }
         loop(vec_inp_pre, vec_exp_pre, offset);
+        offset = next;
+    }
+    if(offset < N)
+    {
+        const DTYPE_I pad = -opus::numeric_limits<DTYPE_I>::infinity();
+        vec_i vec_inp     = sample_load_tail<DTYPE_I, vec_size_i>(ptr_i, offset, N, pad);
+        vec_f vec_exp     = sample_load_tail<float, vec_size_i>(ptr_e, offset, N, 1.0f);
+        loop(vec_inp, vec_exp, offset);
     }
 
     auto max_op = [] __device__(float a, float b) { return __builtin_fmaxf(a, b); };
@@ -246,19 +233,12 @@ __device__ void random_sample_impl(const DTYPE_I* input,
         float new_max_softmax = max_softmax;
         for(int i = 0; i < vec_size_i; i++)
         {
-            if(offset + i < N)
-            {
-                vec_cur_f[i]    = opus::cast<float>(vec[i]) * temperature;
-                new_max_softmax = max(new_max_softmax, vec_cur_f[i]);
-            }
-            else
-            {
-                vec_cur_f[i] = -FLT_MAX;
-            }
+            vec_cur_f[i]    = opus::cast<float>(vec[i]) * temperature;
+            new_max_softmax = max(new_max_softmax, vec_cur_f[i]);
         }
         for(int i = 0; i < vec_size_i; i++)
         {
-            vec_cur_f[i] = offset + i < N ? expf(vec_cur_f[i] - new_max_softmax) : 0.0f;
+            vec_cur_f[i] = expf(vec_cur_f[i] - new_max_softmax);
         }
         float ratio      = expf(max_softmax - new_max_softmax);
         thread_kvp.value = thread_kvp.value * ratio;
@@ -275,34 +255,39 @@ __device__ void random_sample_impl(const DTYPE_I* input,
 
         for(int i = 0; i < vec_size_i; i++)
         {
-            if(offset + i < N)
+            float u      = transform_func((&rand.x)[i]) + eps;
+            vec_cur_f[i] = vec_cur_f[i] / u;
+            if(vec_cur_f[i] > thread_kvp.value)
             {
-                float u      = transform_func((&rand.x)[i]) + eps;
-                vec_cur_f[i] = vec_cur_f[i] / u;
-                if(vec_cur_f[i] > thread_kvp.value)
-                {
-                    thread_kvp.key   = offset + i;
-                    thread_kvp.value = vec_cur_f[i];
-                }
+                thread_kvp.key   = offset + i;
+                thread_kvp.value = vec_cur_f[i];
             }
         }
     };
 
     int offset           = threadIdx.x * vec_size_i;
     const int vec_stride = BlockSize * vec_size_i;
-    if(offset < N)
+    if(offset + vec_size_i <= N)
     {
-        vec_i vec_pre = sample_load_vector<DTYPE_I, vec_size_i, load_chunk_bytes>(
-            buffer_i, ptr_i, offset, N);
-        for(int next = offset + vec_stride; next < N; next += vec_stride)
+        vec_i vec_pre =
+            load_vector_nbytes<DTYPE_I, vec_size_i, load_chunk_bytes>(buffer_i, offset);
+        int next = offset + vec_stride;
+        for(; next + vec_size_i <= N; next += vec_stride)
         {
-            vec_i vec_cur = sample_load_vector<DTYPE_I, vec_size_i, load_chunk_bytes>(
-                buffer_i, ptr_i, next, N);
+            vec_i vec_cur =
+                load_vector_nbytes<DTYPE_I, vec_size_i, load_chunk_bytes>(buffer_i, next);
             loop(vec_pre, offset);
             vec_pre = vec_cur;
             offset  = next;
         }
         loop(vec_pre, offset);
+        offset = next;
+    }
+    if(offset < N)
+    {
+        const DTYPE_I pad = -opus::numeric_limits<DTYPE_I>::infinity();
+        vec_i vec         = sample_load_tail<DTYPE_I, vec_size_i>(ptr_i, offset, N, pad);
+        loop(vec, offset);
     }
 
     auto max_op = [] __device__(float a, float b) { return __builtin_fmaxf(a, b); };
@@ -355,29 +340,37 @@ __device__ void argmax_impl(const DTYPE_I* input, int* output, int m_idx, int N,
         for(int i = 0; i < vec_size_i; i++)
         {
             tmp_kvp.key += 1;
-            if(tmp_kvp.key < N)
-            {
-                tmp_kvp.value = opus::cast<float>(vec[i]);
-                thread_kvp    = arg_max(thread_kvp, tmp_kvp);
-            }
+            tmp_kvp.value = opus::cast<float>(vec[i]);
+            thread_kvp    = arg_max(thread_kvp, tmp_kvp);
         }
     };
 
     int offset           = threadIdx.x * vec_size_i;
     const int vec_stride = BlockSize * vec_size_i;
-    if(offset < N)
+    if(offset + vec_size_i <= N)
     {
-        vec_i vec_pre = sample_load_vector<DTYPE_I, vec_size_i, load_chunk_bytes>(
-            buffer_i, ptr_i, offset, N);
-        for(int next = offset + vec_stride; next < N; next += vec_stride)
+        vec_i vec_pre =
+            load_vector_nbytes<DTYPE_I, vec_size_i, load_chunk_bytes>(buffer_i, offset);
+        int next = offset + vec_stride;
+        for(; next + vec_size_i <= N; next += vec_stride)
         {
-            vec_i vec_cur = sample_load_vector<DTYPE_I, vec_size_i, load_chunk_bytes>(
-                buffer_i, ptr_i, next, N);
+            vec_i vec_cur =
+                load_vector_nbytes<DTYPE_I, vec_size_i, load_chunk_bytes>(buffer_i, next);
             loop(vec_pre, offset);
             vec_pre = vec_cur;
             offset  = next;
         }
         loop(vec_pre, offset);
+        offset = next;
+    }
+    // Greedy sampling has no per-thread RNG state, so spread the final partial
+    // vector across lanes instead of serializing its scalar loads in one lane.
+    const int tail_count = N % vec_size_i;
+    if(threadIdx.x < tail_count)
+    {
+        const int key = N - tail_count + threadIdx.x;
+        kvp tmp_kvp{key, opus::cast<float>(ptr_i[key])};
+        thread_kvp = arg_max(thread_kvp, tmp_kvp);
     }
 
     thread_kvp = block_reduce<kvp, aiter::ArgMax, BlockSize, true>(thread_kvp, arg_max);
@@ -760,7 +753,9 @@ __global__ void exponential_kernel(DTYPE_O* output,
     int64_t idx = m_idx * BlockSize + threadIdx.x;
     hiprand_init(seed, idx, offset, &state);
 
-    for(int k = threadIdx.x * vec_size_o; k < N; k += BlockSize * vec_size_o)
+    int k                = threadIdx.x * vec_size_o;
+    const int vec_stride = BlockSize * vec_size_o;
+    for(; k + vec_size_o <= N; k += vec_stride)
     {
         auto rand = dist_func(&state);
         vec_o vec_cur;
@@ -769,7 +764,18 @@ __global__ void exponential_kernel(DTYPE_O* output,
             float u    = transform_func((&rand.x)[i]) + eps;
             vec_cur[i] = opus::cast<DTYPE_O>(u);
         }
-        sample_store_vector<DTYPE_O, vec_size_o>(buffer_o, ptr_o, vec_cur, k, N);
+        store_vector<DTYPE_O, DTYPE_O, vec_size_o, RT, false>(buffer_o, vec_cur, k, 1.0f);
+    }
+    if(k < N)
+    {
+        auto rand = dist_func(&state);
+        vec_o vec_cur;
+        for(int i = 0; i < vec_size_o; i++)
+        {
+            float u    = transform_func((&rand.x)[i]) + eps;
+            vec_cur[i] = opus::cast<DTYPE_O>(u);
+        }
+        sample_store_tail<DTYPE_O, vec_size_o>(ptr_o, vec_cur, k, N);
     }
 }
 

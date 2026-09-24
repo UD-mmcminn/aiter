@@ -40,7 +40,10 @@ def test_greedy_sample(M, N, dtype=torch.bfloat16):
 
 
 def run_random_sample(input, temperatures, eps, use_aiter_exponential=False):
-    logits = input.to(torch.float)
+    # Always own the benchmark working buffer. Tensor.to() aliases FP32 input
+    # unless copy=True, and the in-place temperature scaling would otherwise
+    # corrupt the input reused by run_perftest.
+    logits = input.to(torch.float, copy=True)
     logits = logits.div_(temperatures.unsqueeze(dim=1))
     probs = softmax(logits)
     torch.cuda.set_rng_state(state_gpu)
@@ -101,7 +104,8 @@ def test_random_sample(M, N, dtype=torch.bfloat16, eps=1e-6):
 
 
 def run_mixed_sample(input, temperatures, eps, use_aiter_exponential=False):
-    logits = input.to(torch.float)
+    # See run_random_sample: this tensor is modified in-place below.
+    logits = input.to(torch.float, copy=True)
     # _, greedy_tokens = topk(logits, 1)
     greedy_tokens = torch.argmax(logits, dim=-1)
     logits.div_(temperatures.unsqueeze(dim=1))
@@ -171,7 +175,7 @@ def _check_tail_tokens(name, actual, expected, n):
         raise AssertionError(f"{name} N={n}: sampled an out-of-range token")
 
 
-def run_tail_checks(dtype, sizes=(1, 17, 1025), eps=1e-6):
+def run_tail_checks(dtype, sizes=(1, 17, 4097, 16385), eps=1e-6):
     """Exercise partial vectors and row boundaries with deterministic winners."""
     for n in sizes:
         logits = torch.full((2, n), -1000.0, dtype=dtype, device="cuda")
@@ -301,7 +305,7 @@ if len(args.sample_type) > 0:
 list_sample_func = [d_sample[key] for key in args.sample_type if key in d_sample]
 
 if args.tail_only:
-    tail_sizes = tuple(l_n) if args.n is not None else (1, 17, 1025)
+    tail_sizes = tuple(l_n) if args.n is not None else (1, 17, 4097, 16385)
     for dtype in list_dtype:
         run_tail_checks(dtype, tail_sizes)
 else:
