@@ -60,7 +60,7 @@ from aiter.ops.topk_plain import topk_plain, topk_plain_batches_ragged_rows
 
 __all__ = ["topk_select", "topk_select_backend"]
 
-_SUPPORTED_GFX = ("gfx942", "gfx950")
+_SUPPORTED_GFX = ("gfx908", "gfx942", "gfx950")
 
 _PLAIN_MAX_K = 2048
 # Which backends can promise a column order among equal scores. `plain` appears
@@ -147,6 +147,19 @@ _DECODE_GATE_AMORTISED = (8192, 128)
 # 262144, which is why it has both ends.
 _DECODE_ANY_ROWS_K = 4096
 _DECODE_ANY_ROWS_BAND = (16384, 131072)
+
+# gfx908 needs a different split between the same portable backends. Its
+# grid-wide decode selector stops scaling much sooner with rows than on the
+# architectures above, while `plain` is unusually strong at both large k and
+# the high-row end. Fitted to 272 exact-correctness cells over widths
+# 32768..131072, rows 1..512 and k 16..2048, including 65535/65537 to make sure
+# this is a band rather than a power-of-two special case. Against the measured
+# per-cell oracle, these rules score 1.005x by summed time; the shared rules
+# score 1.77x and miss by as much as 5.47x.
+_GFX908_MIN_TUNED_WIDTH = 32768
+_GFX908_DECODE_MAX_WORK = 1 << 22
+_GFX908_PLAIN_MIN_K = 1024
+_GFX908_PLAIN_MIN_ROWS = 256
 
 
 @lru_cache(maxsize=1)
@@ -295,6 +308,7 @@ def _choose(
     rows: int,
     width: int,
     k: int,
+    gfx: str,
     wave_size: int,
     ragged: bool,
     tie: str | None,
@@ -317,7 +331,7 @@ def _choose(
             f"no backend serves rows={rows} width={width} topk={k} "
             f"tie={tie!r} deterministic={deterministic} fp32={fp32}"
         )
-    return topk_select_backend(rows, width, k, available)
+    return topk_select_backend(rows, width, k, available, gfx=gfx)
 
 
 def _plain_takes(rows: int, width: int, k: int) -> bool:
@@ -335,8 +349,76 @@ def _decode_takes(rows: int, width: int, k: int) -> bool:
     )
 
 
-def topk_select_backend(
+def _gfx908_backend(
     rows: int, width: int, k: int, available: frozenset[str]
+) -> str | None:
+    """The measured gfx908 route, or ``None`` outside its fitted domain.
+
+    This only takes the unrestricted path where `plain` is available. Tie and
+    deterministic modes remove it and retain the shared policy, rather than
+    extrapolating measurements made with a different candidate set.
+    """
+    if "plain" not in available or width < _GFX908_MIN_TUNED_WIDTH:
+        return None
+
+    # The row-parallel selector owns both ends where decode's grid-wide work
+    # grows with the batch: every measured k >= 1024 and every row count >= 256.
+    if k >= _GFX908_PLAIN_MIN_K or rows >= _GFX908_PLAIN_MIN_ROWS:
+        return "plain"
+
+    if k >= 512:
+        # At k=512 decode wins while its total input stays near four million
+        # elements: 64x65535 and 32x131072. Below 32K, plain's lower fixed cost
+        # wins even when the product fits.
+        if (
+            "decode" in available
+            and width > _GFX908_MIN_TUNED_WIDTH
+            and rows * width <= _GFX908_DECODE_MAX_WORK
+        ):
+            return "decode"
+        return "plain"
+
+    if k >= 256:
+        if rows <= 16 and "decode" in available:
+            return "decode"
+        if rows <= 128 and "stream" in available:
+            return "stream"
+        return "plain"
+
+    if k >= 128:
+        if rows <= 4:
+            return "plain"
+        if rows <= 16:
+            if width > _GFX908_MIN_TUNED_WIDTH and "decode" in available:
+                return "decode"
+            if "stream" in available:
+                return "stream"
+        if rows <= 64 and width < 131072 and "stream" in available:
+            return "stream"
+        return "plain"
+
+    # At small k the fixed-cost plain path usually wins. Two measured occupancy
+    # windows are worth retaining: stream on 32K rows, and decode once eight
+    # 128K rows provide enough independent work. The latter stops before 16
+    # rows, where plain is already 1.19x faster.
+    if "decode" in available and width >= 131072 and 1 < rows <= 8:
+        return "decode"
+    if (
+        "stream" in available
+        and width <= _GFX908_MIN_TUNED_WIDTH
+        and 8 <= rows <= 64
+    ):
+        return "stream"
+    return "plain"
+
+
+def topk_select_backend(
+    rows: int,
+    width: int,
+    k: int,
+    available: frozenset[str],
+    *,
+    gfx: str | None = None,
 ) -> str:
     """Name the backend to use for this shape among those that can serve it.
 
@@ -367,6 +449,10 @@ def topk_select_backend(
     `topk_backend_fit.py`, whenever `_dispatch` changes what it hands a backend;
     twice now that has moved a boundary the fit alone would have kept.
 
+    ``gfx`` selects an architecture-specific fit where one exists. Omitting it
+    retains the shared gfx942/gfx950 policy and keeps this helper usable as a
+    pure, host-side policy function.
+
     The returned name is always one of `available`.
     """
     if not available:
@@ -375,6 +461,10 @@ def topk_select_backend(
     # the answer does not need, and lose 1.3x to 12x doing so.
     if "argmax" in available:
         return "argmax"
+    if gfx == "gfx908":
+        backend = _gfx908_backend(rows, width, k, available)
+        if backend is not None:
+            return backend
     if "plain" in available and _plain_takes(rows, width, k):
         return "plain"
     if "small_k" in available and k <= _SMALL_K_MAX_K:
@@ -590,6 +680,7 @@ def topk_select(
         rows,
         width,
         topk,
+        get_gfx(),
         wave_size_of(input.device.index),
         end is not None,
         tie,

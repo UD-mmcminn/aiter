@@ -37,7 +37,7 @@ from aiter.test_common import benchmark, checkAllclose, run_perftest
 
 torch.set_default_device("cuda")
 
-SUPPORTED_GFX = ["gfx942", "gfx950"]
+SUPPORTED_GFX = ["gfx908", "gfx942", "gfx950"]
 
 
 def run_torch(x, row_lens, k):
@@ -81,7 +81,11 @@ def test_topk_select(m, n, k, tie, deterministic):
 
     # One pass of the row plus the k written back.
     nbytes = (m * n + m * k) * x.element_size()
-    ret = {"gfx": get_gfx(), "picked": topk_select_backend(m, n, k, serving)}
+    gfx = get_gfx()
+    ret = {
+        "gfx": gfx,
+        "picked": topk_select_backend(m, n, k, serving, gfx=gfx),
+    }
     for name, fn in candidates.items():
         out, us = run_perftest(fn)
         ret[f"{name} us"] = us
@@ -213,7 +217,7 @@ def _run_single_backend(x, row_lens, k, backend):
         rows, width = x.shape
         wave = wave_size_of(x.device.index)
         served = ts._available(width, k, wave, False) & {backend}
-        picked = ts.topk_select_backend(rows, width, k, served)
+        picked = ts.topk_select_backend(rows, width, k, served, gfx=get_gfx())
         if picked != backend:
             raise AssertionError(f"asked for {backend}, the dispatch chose {picked}")
         return topk_select(x, k)[1]
@@ -310,6 +314,54 @@ def test_lds_sizing():
 
     for label in failures:
         aiter.logger.error("LDS SIZING FAILED: %s", label)
+    return failures
+
+
+def test_routing_policy():
+    """Architecture-specific fits stay isolated and return a live backend."""
+    failures = []
+
+    def want(cond, label):
+        if not cond:
+            failures.append(label)
+
+    all_backends = frozenset({"decode", "plain", "stream"})
+    measured = {
+        (1, 65536, 16): "plain",
+        (16, 65536, 128): "decode",
+        (64, 65536, 256): "stream",
+        (64, 65536, 512): "decode",
+        (128, 65536, 512): "plain",
+        (1, 65536, 1024): "plain",
+        (64, 131072, 512): "plain",
+    }
+    for (rows, width, k), expected in measured.items():
+        got = topk_select_backend(rows, width, k, all_backends, gfx="gfx908")
+        want(got == expected, f"gfx908 {(rows, width, k)}: {got}, want {expected}")
+
+    # This is deliberately different on the shared fit: adding gfx908 must not
+    # retune gfx942/gfx950 as a side effect.
+    want(
+        topk_select_backend(64, 65536, 16, all_backends, gfx="gfx950") == "decode",
+        "gfx950 retains the shared route",
+    )
+    # `plain` is removed by deterministic/tie modes. Those modes were not in
+    # the gfx908 fit, so they must fall back to the shared policy.
+    narrowed = frozenset({"decode", "stream"})
+    want(
+        topk_select_backend(128, 65536, 1024, narrowed, gfx="gfx908")
+        == "decode",
+        "gfx908 narrowed candidate set retains the shared route",
+    )
+    for backend in all_backends:
+        only = frozenset({backend})
+        want(
+            topk_select_backend(64, 65536, 256, only, gfx="gfx908") == backend,
+            f"gfx908 returns the sole available backend: {backend}",
+        )
+
+    for label in failures:
+        aiter.logger.error("ROUTING POLICY FAILED: %s", label)
     return failures
 
 
@@ -453,6 +505,10 @@ def main():
     bad = test_lds_sizing()
     aiter.logger.info(
         "LDS sizing: %s", "all hold" if not bad else f"{len(bad)} FAILED: {bad}"
+    )
+    bad = test_routing_policy()
+    aiter.logger.info(
+        "routing policy: %s", "all hold" if not bad else f"{len(bad)} FAILED: {bad}"
     )
     bad = test_invariants(64, 32768, 512)
     aiter.logger.info(
