@@ -108,10 +108,32 @@ needs a portable correctness fallback and shape/architecture gating.
 - Keep general correctness fixes, gfx908 enablement, workload tuning, ISA code
   objects, and multi-GPU changes in separately reviewable commits and PRs.
 
+## Tracked kernel follow-ups
+
+### GroupNorm channel-boundary vectorization
+
+After the channel-boundary correctness fix lands, evaluate restoring the
+vectorized GroupNorm path whenever `inner_size % 4 == 0`. Keep the up kernel
+vectorized and teach the down kernel to distinguish vectors contained within a
+single channel from vectors that straddle a channel boundary. For straddling
+vectors, advance the channel and in-channel offset across the four lanes from a
+single initial division rather than adding a division/modulo per lane.
+
+Retain this optimization only if MI100 measurements show a useful improvement
+without a maintainability regression. Cover BF16, FP16, and FP32; multiple
+batch/group configurations; and `numel_per_channel` values including 1, 2, 3,
+5, 17, and a large odd spatial size such as 32769. The two kernels must continue
+to share launch geometry because the partial-reduction workspace is indexed by
+`gridDim.x`.
+
+Track large-tensor indexing as a separate hardening change. Promoting only the
+flattened `idx` is insufficient: `inner_size`, loop counters and strides, launch
+arithmetic, and workspace offsets must be audited together for values beyond
+32-bit range and benchmarked for hot-path cost.
+
 ## Completion criteria for the follow-on program
 
 The program is successful when it produces reproducible workload benchmarks,
 a profile-backed set of optimized kernels/configurations, quantified memory
 improvements, and measured four-/eight-GPU scaling. A large checked-in gfx908
 code-object inventory is not itself a success criterion.
-
