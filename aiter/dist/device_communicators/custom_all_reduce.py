@@ -119,6 +119,13 @@ _DEFAULT_CAR_MAX_SIZE = 8192 * 8192
 # the historical 64 MiB default everywhere else.
 _GFX908_TP4_CAR_MAX_SIZE = 6 * 1024 * 1024
 
+# Architectures supported by the native FP8 conversion intrinsics used by the
+# quantized custom-all-reduce kernel. Keep this in sync with the conversion
+# guards in csrc/include/opus/opus.hpp.
+_NATIVE_FP8_CONVERSION_ARCHES = frozenset(
+    {"gfx942", "gfx950", "gfx1200", "gfx1201", "gfx1250"}
+)
+
 # Env var to override the custom-AR size cutoff (in bytes). See
 # _resolve_car_max_size for the semantics.
 _CAR_MAX_SIZE_ENV = "AITER_CUSTOM_AR_MAX_SIZE"
@@ -829,6 +836,10 @@ class CustomAllreduce:
 
         props = torch.cuda.get_device_properties(device)
         gcn_arch = getattr(props, "gcnArchName", "")
+        self._gcn_arch = gcn_arch.split(":", 1)[0]
+        self._supports_native_fp8_conversion = (
+            self._gcn_arch in _NATIVE_FP8_CONVERSION_ARCHES
+        )
         if "gfx1250" in gcn_arch and world_size > 4:
             raise RuntimeError(
                 f"gfx1250 (MI450) custom allreduce only supports "
@@ -1224,6 +1235,11 @@ class CustomAllreduce:
         IPC-registered. Otherwise, inp is first copied into a pre-registered
         buffer.
         """
+        if open_fp8_quant and not self._supports_native_fp8_conversion:
+            raise RuntimeError(
+                "FP8-quantized custom all-reduce requires native FP8 conversion "
+                f"support; architecture {self._gcn_arch or 'unknown'} is unsupported"
+            )
         if out is None:
             out = torch.empty_like(inp)
         assert is_weak_contiguous(out), "output tensor is not weak-contiguous"
