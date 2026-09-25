@@ -27,17 +27,6 @@ class QuickReduceRegime(Enum):
     NONE = 5
 
 
-try:
-    quick_ar = False
-    regime_str = os.environ.get("AITER_QUICK_REDUCE_QUANTIZATION", None)
-    if regime_str in QuickReduceRegime.__members__:
-        ops.qr_max_size()
-        quick_ar = True
-except Exception:  # noqa: BLE001
-    # For CPUs and CUDA
-    quick_ar = False
-
-
 def qr_rocm_arch_available():
     try:
         props = torch.cuda.get_device_properties(0)
@@ -47,6 +36,21 @@ def qr_rocm_arch_available():
     except Exception as e:  # noqa: BLE001
         logger.warning("Failed to determine ROCm for quick allreduce: %s", e)
         return False
+
+
+try:
+    quick_ar = False
+    regime_str = os.environ.get("AITER_QUICK_REDUCE_QUANTIZATION", None)
+    if (
+        regime_str in QuickReduceRegime.__members__
+        and regime_str != QuickReduceRegime.NONE.name
+        and qr_rocm_arch_available()
+    ):
+        ops.qr_max_size()
+        quick_ar = True
+except Exception:  # noqa: BLE001
+    # For CPUs and CUDA
+    quick_ar = False
 
 
 def is_weak_contiguous(inp: torch.Tensor):
