@@ -21,6 +21,7 @@
 #include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
+#include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -41,6 +42,56 @@ namespace aiter {
 enum class ReduceScatterSplitDim : int { kFirst = 0, kLast = 1, kMid = 2 };
 
 constexpr int kMaxBlocks = 80;
+
+inline int custom_ar_grid_cap()
+{
+    const char* raw = std::getenv("AITER_CUSTOM_AR_GRID_CAP");
+    if(raw == nullptr || *raw == '\0')
+        return 0;
+
+    char* end = nullptr;
+    long value = std::strtol(raw, &end, 10);
+    if(end == raw || *end != '\0' || value < 1 || value > kMaxBlocks)
+        throw std::runtime_error(
+            "AITER_CUSTOM_AR_GRID_CAP must be an integer in [1, " +
+            std::to_string(kMaxBlocks) + "], got '" + raw + "'");
+    return static_cast<int>(value);
+}
+
+struct CustomArGridCaps
+{
+    int one_stage = kMaxBlocks;
+    int two_stage = kMaxBlocks;
+};
+
+inline CustomArGridCaps resolve_custom_ar_grid_caps(int world_size)
+{
+    const int override = custom_ar_grid_cap();
+    if(override > 0)
+        return {override, override};
+
+    CustomArGridCaps caps;
+    if(world_size == 4)
+    {
+        hipDevice_t dev;
+        hipDeviceProp_t dev_prop;
+        HIP_CALL(hipGetDevice(&dev));
+        HIP_CALL(hipGetDeviceProperties(&dev_prop, dev));
+
+        std::string arch = dev_prop.gcnArchName;
+        const auto suffix = arch.find(':');
+        if(suffix != std::string::npos)
+            arch.resize(suffix);
+
+        // TP4 two-stage traffic saturates gfx908 XGMI well before 80 blocks;
+        // additional blocks increase contention. The one-stage cap remains
+        // unchanged.
+        if(arch == "gfx908")
+            caps.two_stage = 24;
+    }
+    return caps;
+}
+
 // note: we don't want to use atomics for signals because peer atomics are no
 // supported on PCIe links
 struct Signal
@@ -3933,6 +3984,9 @@ class CustomAllreduce
     int rank_;
     int world_size_;
     bool full_nvlink_;
+    // Constructor-cached launch policy. This keeps environment parsing and
+    // gfx908 selection out of the collective launch path.
+    CustomArGridCaps grid_caps_;
 
     // below are device pointers
     RankSignals sg_;
@@ -3983,6 +4037,7 @@ class CustomAllreduce
         : rank_(rank),
           world_size_(offsets.size()),
           full_nvlink_(fully_connected),
+          grid_caps_(resolve_custom_ar_grid_caps(static_cast<int>(offsets.size()))),
           self_sg_(meta),
           d_rank_data_base_(reinterpret_cast<RankData*>(rank_data)),
           d_rank_data_end_(d_rank_data_base_ + rank_data_sz / sizeof(RankData))
@@ -4606,12 +4661,12 @@ class CustomAllreduce
         }
         if(call_1stage)
         {
-            blocks = std::min(kMaxBlocks,
+            blocks = std::min(grid_caps_.one_stage,
                               (size + (threads / world_size_) - 1) / (threads / world_size_));
         }
         else if(call_2stage)
         {
-            blocks = std::min(kMaxBlocks,
+            blocks = std::min(grid_caps_.two_stage,
                               (size / world_size_ + (threads / world_size_) - 1) /
                                   (threads / world_size_));
             if(world_size_ == 8 && bytes > 512 * 4096 * 2 &&

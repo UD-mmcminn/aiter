@@ -114,6 +114,11 @@ _IPC_MIN_ROCM = (7, 14)
 # the historical decode threshold.
 _DEFAULT_CAR_MAX_SIZE = 8192 * 8192
 
+# On a four-GPU gfx908 XGMI hive the tuned two-stage kernel wins through the
+# mid-single-digit MiB range, while RCCL has better bandwidth above it. Keep
+# the historical 64 MiB default everywhere else.
+_GFX908_TP4_CAR_MAX_SIZE = 6 * 1024 * 1024
+
 # Env var to override the custom-AR size cutoff (in bytes). See
 # _resolve_car_max_size for the semantics.
 _CAR_MAX_SIZE_ENV = "AITER_CUSTOM_AR_MAX_SIZE"
@@ -129,11 +134,13 @@ _DEFAULT_CAR_MIN_SIZE = 0
 _CAR_MIN_SIZE_ENV = "AITER_CUSTOM_AR_MIN_SIZE"
 
 
-def _resolve_car_max_size(pool_size: int) -> int:
+def _resolve_car_max_size(
+    pool_size: int, default_size: int = _DEFAULT_CAR_MAX_SIZE
+) -> int:
     """Resolve the custom-AR size cutoff (bytes) from ``AITER_CUSTOM_AR_MAX_SIZE``.
 
     Semantics:
-      * unset / empty / unparyable  -> default (64 MiB), i.e. unchanged behavior.
+      * unset / empty / unparsable  -> architecture/world-size default.
       * 0                           -> 0: custom AR disabled, everything uses RCCL.
       * 0 < v <= pool_size          -> v: custom AR used up to v bytes.
       * v > pool_size               -> too large: the registered pool cannot hold
@@ -144,7 +151,7 @@ def _resolve_car_max_size(pool_size: int) -> int:
     """
     raw = os.environ.get(_CAR_MAX_SIZE_ENV, "").strip()
     if raw == "":
-        return _DEFAULT_CAR_MAX_SIZE
+        return default_size
     try:
         v = int(raw)
     except ValueError:
@@ -152,17 +159,17 @@ def _resolve_car_max_size(pool_size: int) -> int:
             "%s=%r is not an integer; using default %d bytes.",
             _CAR_MAX_SIZE_ENV,
             raw,
-            _DEFAULT_CAR_MAX_SIZE,
+            default_size,
         )
-        return _DEFAULT_CAR_MAX_SIZE
+        return default_size
     if v < 0:
         logger.warning(
             "%s=%d is negative; using default %d bytes.",
             _CAR_MAX_SIZE_ENV,
             v,
-            _DEFAULT_CAR_MAX_SIZE,
+            default_size,
         )
-        return _DEFAULT_CAR_MAX_SIZE
+        return default_size
     if v == 0:
         logger.info(
             "%s=0: custom allreduce disabled; all sizes fall back to RCCL.",
@@ -178,11 +185,11 @@ def _resolve_car_max_size(pool_size: int) -> int:
             )
     except ValueError as e:
         logger.warning(
-            "%s Falling back to the default %d bytes (64 MiB).",
+            "%s Falling back to the default %d bytes.",
             e,
-            _DEFAULT_CAR_MAX_SIZE,
+            default_size,
         )
-        return _DEFAULT_CAR_MAX_SIZE
+        return default_size
     logger.info(
         "Custom allreduce size cutoff overridden to %d bytes via %s.",
         v,
@@ -909,9 +916,17 @@ class CustomAllreduce:
         )
         self.max_size = max_size
         # Custom-AR size cutoff (bytes): inputs at or below this run on the
-        # custom kernels; larger ones fall back to RCCL. Overridable via
-        # AITER_CUSTOM_AR_MAX_SIZE (capped at the registered pool size == max_size).
-        self._car_max_size = _resolve_car_max_size(max_size)
+        # custom kernels; larger ones fall back to RCCL. gfx908 TP4 uses its
+        # measured XGMI crossover; other configurations retain the historical
+        # 64 MiB default. The explicit environment override always wins.
+        default_car_max_size = (
+            _GFX908_TP4_CAR_MAX_SIZE
+            if "gfx908" in gcn_arch and world_size == 4
+            else _DEFAULT_CAR_MAX_SIZE
+        )
+        self._car_max_size = _resolve_car_max_size(
+            max_size, default_size=default_car_max_size
+        )
         # Custom-AR lower size bound (bytes): inputs at or below this fall back
         # to RCCL. Default 0 (no lower bound). Overridable via
         # AITER_CUSTOM_AR_MIN_SIZE. Custom AR runs only in (min, max].
